@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "wc_word_report_tool"
+version = "0.1.0"
+description = "Word report helpers with page numbering, table of contents, and Chinese uppercase number conversion."
+readme = "README.md"
+requires-python = ">=3.9"
+license = "MIT"
+authors = [
+  { name = "willcha" }
+]
+dependencies = [
+  "python-docx>=1.1.0"
+]
+keywords = ["word", "docx", "chinese", "rmb", "formatter"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.9",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Office/Business",
+  "Topic :: Software Development :: Libraries :: Python Modules"
+]
+
+[project.urls]
+Homepage = "https://github.com/weichao1221/wc_word_report_tool"
+Repository = "https://github.com/weichao1221/wc_word_report_tool"
+
+[project.scripts]
+wc-rmb-upper = "wc_word_report_tool.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]

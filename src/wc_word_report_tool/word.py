@@ -104,6 +104,7 @@ class WordFormatter:
     @staticmethod
     def _apply_style_options(style, options: dict):
         font_name = options.get("font_name")
+        en_font = options.get("en_font")
         size = options.get("font_size")
         bold = options.get("bold")
         color = options.get("color")
@@ -115,7 +116,7 @@ class WordFormatter:
         alignment = options.get("alignment")
 
         if font_name:
-            style.font.name = "Times New Roman"
+            style.font.name = en_font
             style.element.rPr.rFonts.set(qn("w:eastAsia"), font_name)
         if size is not None:
             style.font.size = Pt(size)
@@ -138,7 +139,7 @@ class WordFormatter:
         return style
 
     @staticmethod
-    def _configure_heading_style(doc, level: int, *, cn_font: str, size: int, bold: bool,
+    def _configure_heading_style(doc, level: int, *, cn_font: str, en_font: str, size: int, bold: bool,
                                  color: tuple[int, int, int] | None = None, line_spacing=1,
                                  space_before=12, space_after=12, first_line_indent=28):
         style = doc.styles[f"Heading {level}"]
@@ -146,6 +147,7 @@ class WordFormatter:
             style,
             {
                 "font_name": cn_font,
+                "en_font": en_font,
                 "font_size": size,
                 "bold": bold,
                 "color": color,
@@ -158,13 +160,14 @@ class WordFormatter:
         )
 
     @staticmethod
-    def _add_heading_with_style(doc, heading_text: str, *, level: int, cn_font: str, size: int, bold: bool,
+    def _add_heading_with_style(doc, heading_text: str, *, level: int, cn_font: str, en_font: str, size: int, bold: bool,
                                 color: tuple[int, int, int] | None = None, line_spacing=1,
                                 space_before=12, space_after=12, first_line_indent=28):
         WordFormatter._configure_heading_style(
             doc,
             level,
             cn_font=cn_font,
+            en_font=en_font,
             size=size,
             bold=bold,
             color=color,
@@ -203,18 +206,20 @@ class WordFormatter:
         return par
 
     @staticmethod
-    def Heading_1(doc, heading_text: str):
+    def Heading_1(doc, heading_text: str, font_name:str="黑体"):
         return WordFormatter._add_heading_with_style(
             doc,
             heading_text,
             level=1,
-            cn_font="黑体",
+            cn_font=font_name,
+            en_font="Times New Roman",
             size=16,
             bold=False,
             line_spacing=1.5,
             space_before=12,
             space_after=12,
             first_line_indent=28,
+            color=(0, 0, 0)
         )
 
     @staticmethod
@@ -247,7 +252,7 @@ class WordFormatter:
             par, alignment=WD_PARAGRAPH_ALIGNMENT.JUSTIFY, first_line_indent_pt=28
         )
         run = par.add_run(text_content)
-        WordFormatter._set_run_font(run, cn_font="仿宋_GB2312", size=14)
+        WordFormatter._set_run_font(run, cn_font="仿宋_GB2312", size=14, color=(0, 0, 0))
         return par
 
     @staticmethod
@@ -261,7 +266,7 @@ class WordFormatter:
         par = doc.add_paragraph("")
         WordFormatter._set_paragraph_basic_format(par, alignment=WD_PARAGRAPH_ALIGNMENT.CENTER)
         run = par.add_run(text_content)
-        WordFormatter._set_run_font(run, cn_font="仿宋_GB2312", size=16, bold=True)
+        WordFormatter._set_run_font(run, cn_font="仿宋_GB2312", size=16, bold=True, color=(0, 0, 0))
         return par
 
     @staticmethod

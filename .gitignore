@@ -1,7 +1,3 @@
-__pycache__/
-*.py[cod]
-.pytest_cache/
-.coverage
-build/
 dist/
-src/*.egg-info/
+.idea/
+wc_word_report_tool.egg-info/

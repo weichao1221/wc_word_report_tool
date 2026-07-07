@@ -1,9 +1,14 @@
 # wc_word_report_tool
 
-一个可独立上传到 PyPI 的小包，包含两部分：
+基于 `python-docx` 的中文 Word 报告格式化工具，内置：
 
-1. `number_to_chinese_upper()`：把数字转成中文金额大写。
-2. `WordFormatter`：基于 `python-docx` 的常用 Word 格式化方法。
+1. **数字转中文大写**：`number_to_chinese_upper()` 把数字转成人民币金额大写。
+2. **Word 格式化**：`WordFormatter` 提供从封面、正文、表格、页眉页脚到目录、页码的完整覆盖，默认值贴近中国公文标准。
+
+> 版本：v0.2.0
+> 作者：willcha
+> 许可证：MIT
+> Python：>=3.9
 
 ## 安装
 
@@ -26,124 +31,256 @@ print(number_to_chinese_upper(123456.78))
 wc-rmb-upper 100200.03
 ```
 
-## Word 方法
+## 设计理念（v0.2.0 重构说明）
+
+v0.2.0 对 API 做了系统性重构，目标：
+
+1. **覆盖完整**：补齐表格、页眉页脚、文档默认样式等 v0.1.x 缺失能力。
+2. **命名一致**：所有新方法使用 snake_case（`heading1` / `body` / `set_header`），告别拼音 + 大小写混杂。
+3. **默认合理**：默认值贴近公文标准（仿宋_GB2312、三号 14pt、1.5 倍行距）。
+4. **严格校验**：未知对齐方式抛 `ValueError` 而非静默降级，便于调试。
+5. **向后兼容**：v0.1.x 的旧 API（`Heading_1` / `Normal_doc` / `fengmian_doc1` 等）保留为别名，调用时发 `DeprecationWarning`，已有代码无需修改即可升级。
+
+## 快速上手
+
+### 完整报告骨架
 
 ```python
 from docx import Document
 from wc_word_report_tool import WordFormatter
 
 doc = Document()
-WordFormatter.set_all_layout(doc)
-WordFormatter.fengmian_doc1(doc, "测试项目")
-WordFormatter.Heading_1(doc, "1. 概述")
-WordFormatter.Normal_doc(doc, "这是正文。")
+
+# 1. 文档级设置
+WordFormatter.set_default_font(doc, font_size="三号",
+                               cn_font="仿宋_GB2312", en_font="Times New Roman")
+WordFormatter.set_language(doc, "zh-CN")
+WordFormatter.set_page_margins(doc, top=2.54, bottom=2.54, left=3.17, right=3.17)
+
+# 2. 封面
+WordFormatter.insert_img(doc, "logo.png", width=5)
+WordFormatter.blank_lines(doc, 2)
+WordFormatter.cover_text(doc, "测试项目", font_name="宋体", font_size=22, bold=True)
+WordFormatter.blank_lines(doc, 8)
+WordFormatter.right_text(doc, "委托单位：XXX公司")
+WordFormatter.right_text(doc, "编制单位：YYY公司")
+
+# 3. 正文（新节）
+WordFormatter.insert_section(doc)
+WordFormatter.heading1(doc, "1. 概述")
+WordFormatter.body(doc, "本项目位于……，建设内容包括……")
+WordFormatter.heading2(doc, "1.1 项目背景")
+WordFormatter.body(doc, "项目背景说明……")
+
+# 4. 表格
+WordFormatter.add_table(
+    doc,
+    headers=["序号", "项目", "金额（万元）"],
+    rows=[
+        ["1", "建筑工程", "1200.50"],
+        ["2", "安装工程", "850.00"],
+        ["3", "合计", "2050.50"],
+    ],
+    col_widths=[2, 6, 4],
+    font_size=12,
+)
+
+# 5. 页眉页脚 + 页码从正文开始
+WordFormatter.set_header(doc.sections[1], "测试项目 竣工决算报告", alignment="居中")
+WordFormatter.set_page_number_from_section(doc, start_section_idx=1, start=1,
+                                            prefix="第 ", suffix=" 页")
+
+# 6. 目录
+WordFormatter.add_toc(doc, title="目  录", levels=(1, 3))
+
 doc.save("demo.docx")
 ```
 
-## 页码从指定位置重新按 1 开始
+## API 总览
 
-Word 里“页码重新从 1 开始”本质上要靠“分节”实现。
+### 文档级设置
+
+| 方法 | 用途 | 备注 |
+|------|------|------|
+| `set_default_font(doc, *, font_size, cn_font, en_font)` | 设置 Normal 样式默认字体 | v0.2.0 新增 |
+| `set_language(doc, lang)` | 设置文档语言 | v0.2.0 新增 |
+| `set_page_margins(doc, *, top, bottom, left, right, gutter, horizontal_alignment)` | 页边距 | 替代 `set_all_layout` / `set_document_layout` |
+
+### 段落与标题
+
+| 方法 | 用途 |
+|------|------|
+| `body(doc, text, *, font_name, font_size, indent, alignment)` | 正文段落（首行缩进 + 1.5 倍行距） |
+| `blank_lines(doc, count)` | 批量空行 |
+| `heading1(doc, text, *, font_name, font_size)` | 一级标题（黑体 16pt） |
+| `heading2(doc, text, *, font_name, font_size)` | 二级标题（仿宋 14pt 加粗） |
+| `heading3(doc, text, *, font_name, font_size)` | 三级标题（仿宋 14pt） |
+| `cover_text(doc, text, *, font_name, font_size, bold)` | 封面文本（居中），替代 `fengmian_doc1/2/3` |
+| `right_text(doc, text, *, font_name, font_size, indent)` | 右对齐段落（公司名/日期） |
+| `created_time(doc, value, *, font_name, font_size)` | 日期文本（None=今天） |
+| `insert_img(doc, img_path, width, *, alignment)` | 插入图片（width 单位 cm） |
+
+### 表格（v0.2.0 新增）
+
+| 方法 | 用途 |
+|------|------|
+| `add_table(doc, headers, rows, *, col_widths, font_size, header_bold, alignment, border_color, border_size)` | 一站式创建带表头表格 |
+| `set_cell(cell, text, *, font_name, font_size, bold, alignment, line_spacing)` | 设置单元格格式（支持加粗/对齐） |
+| `set_table_borders(table, *, color, size)` | 为表格添加边框 |
 
 ```python
-from docx import Document
-from wc_word_report_tool import WordFormatter
-
-doc = Document()
-WordFormatter.Normal_doc(doc, "前置内容，不参与新的页码计数")
-
-WordFormatter.insert_section_with_page_numbering(
+WordFormatter.add_table(
     doc,
-    start_page_number=1,
-    prefix="第",
-    suffix="页",
+    headers=["序号", "项目", "金额"],
+    rows=[["1", "建安费", "1200"], ["2", "设备费", "850"]],
+    col_widths=[2, 5, 3],          # cm
+    header_bold=True,
     alignment="居中",
 )
-
-WordFormatter.Heading_1(doc, "1. 正文开始")
-WordFormatter.Normal_doc(doc, "这里所在的节，页码会从 1 开始。")
-doc.save("page_number_demo.docx")
 ```
 
-如果你已经自己建好了分节，也可以直接对某个 `section` 调：
+### 页眉页脚（v0.2.0 新增）
+
+| 方法 | 用途 |
+|------|------|
+| `set_header(section, text, *, alignment, font_name, font_size)` | 设置节页眉（默认楷体小五号） |
+| `set_footer(section, text, *, alignment, font_name, font_size)` | 设置节页脚（默认楷体小五号） |
+| `clear_header(section)` / `clear_footer(section)` | 清空节页眉/页脚 |
 
 ```python
-section = doc.sections[1]
-WordFormatter.restart_page_numbering(section, start=1)
+WordFormatter.set_header(doc.sections[1], "项目名称 报告名称", alignment="居中")
+WordFormatter.set_footer(doc.sections[1], "编制单位名称", alignment="居右")
 ```
 
-## 生成目录并定义目录级别样式
+### 节与页码
+
+| 方法 | 用途 |
+|------|------|
+| `insert_section(doc, start_type)` | 插入新节 |
+| `set_page_number_start(section, start)` | 设置节页码起始值 |
+| `add_page_number(paragraph, *, prefix, suffix, alignment, font_name, font_size)` | 向段落添加 PAGE 域 |
+| `add_footer_page_number(section, *, prefix, suffix, ...)` | 节页脚添加页码 |
+| `restart_page_numbering(section, *, start, add_footer_number, ...)` | 重启单节页码 |
+| `insert_section_with_page_numbering(doc, *, start_page_number, ...)` | 插入节并重启页码（组合方法） |
+| `set_page_number_from_section(doc, start_section_idx, *, start, ...)` | **跨节页码**：从指定节起编号，之前节无页码 |
 
 ```python
-from docx import Document
-from wc_word_report_tool import WordFormatter
+# 文档有 3 个节：0=前置（封面/扉页/目录）, 1=正文起, 2=正文续
+WordFormatter.set_page_number_from_section(
+    doc, start_section_idx=1, start=1,
+    prefix="第 ", suffix=" 页", alignment="居中",
+)
+# 节0 无页码，节1 从"第 1 页"开始，节2 链接前节延续编号
+```
 
-doc = Document()
+### 目录
+
+| 方法 | 用途 |
+|------|------|
+| `add_toc(doc, *, title, levels, toc_level_styles, ...)` | 插入 Word 目录域（TOC field） |
+| `set_toc_level_style(doc, level, *, font_name, ...)` | 设置某一级 TOC 样式 |
+| `set_paragraph_style(doc, style_name, *, base_style_name, ...)` | 创建/更新自定义段落样式 |
+| `add_custom_heading(doc, text, *, style_name, level, ...)` | 使用自定义样式添加标题 |
+
+```python
 WordFormatter.add_toc(
     doc,
-    title="目录",
+    title="目  录",
     levels=(1, 3),
     toc_level_styles={
         1: {"font_name": "黑体", "font_size": 14, "bold": True, "space_after": 6},
         2: {"font_name": "仿宋_GB2312", "font_size": 12, "left_indent": 24},
-        3: {"font_name": "宋体", "font_size": 11, "left_indent": 48},
     },
 )
-
-WordFormatter.Heading_1(doc, "1. 一级标题")
-WordFormatter.Heading_2(doc, "1.1 二级标题")
-WordFormatter.Heading_3(doc, "1.1.1 三级标题")
-doc.save("toc_demo.docx")
+WordFormatter.heading1(doc, "1. 一级标题")
+WordFormatter.heading2(doc, "1.1 二级标题")
 ```
 
-也可以单独设置某一级目录样式：
+### 底层工具方法
 
-```python
-WordFormatter.set_toc_level_style(
-    doc,
-    1,
-    font_name="黑体",
-    font_size=14,
-    bold=True,
-)
+| 方法 | 用途 |
+|------|------|
+| `set_run_font(run, *, cn_font, en_font, size, bold, color, highlight)` | 设置 run 字体 |
+| `set_paragraph_format(paragraph, *, alignment, line_spacing, ...)` | 设置段落格式 |
+| `resolve_alignment(alignment, *, strict)` | 对齐方式解析 |
+
+## 字号参数
+
+`font_size` 参数支持两种形式：
+
+- **数字（pt）**：`font_size=14` 表示 14pt
+- **中文字号字符串**：`font_size="三号"` = 16pt，`font_size="小五"` = 9pt
+
+支持的中文字号：`初号/小初/一号/小一/二号/小二/三号/小三/四号/小四/五号/小五/六号/小六/七号/八号`。
+
+## 对齐方式参数
+
+`alignment` 参数支持多种形式：
+
+| 类型 | 示例 |
+|------|------|
+| 中文 | `"居中"` / `"居左"` / `"居右"` / `"左对齐"` / `"右对齐"` / `"两端对齐"` |
+| 英文 | `"center"` / `"left"` / `"right"` / `"justify"` |
+| 单字母 | `"C"` / `"L"` / `"R"` |
+| 数字 | `1` / `2` / `3` |
+| 枚举 | `WD_PARAGRAPH_ALIGNMENT.CENTER` |
+
+默认 `strict=False` 时未知值回退 LEFT；`strict=True` 时抛 `ValueError`。
+
+## 单位约定
+
+| 参数 | 单位 |
+|------|------|
+| `top/bottom/left/right`（页边距） | cm |
+| `gutter`（装订线） | cm |
+| `width`（图片宽度） | cm |
+| `col_widths`（列宽） | cm |
+| `font_size`（字号） | pt 或中文字号 |
+| `space_before/space_after` | pt |
+| `first_line_indent_pt` | pt |
+| `border_size`（边框粗细） | 1/8 pt（4 = 0.5pt 细线，8 = 1pt） |
+
+## 向后兼容（v0.1.x → v0.2.0 迁移指南）
+
+旧 API 仍可用，调用时发 `DeprecationWarning`：
+
+| 旧 API | 新 API | 备注 |
+|--------|--------|------|
+| `set_all_layout` / `set_document_layout` | `set_page_margins` | 合并 |
+| `fengmian_doc1` / `fengmian_doc2` / `fengmian_doc3` | `cover_text` | 统一为参数化方法 |
+| `Heading_1` / `Heading_2` / `Heading_3` | `heading1` / `heading2` / `heading3` | snake_case |
+| `Normal_doc` | `body` | 语义更清晰 |
+| `Normal_doc_Highlight` | `body` + run 高亮 | 拆分 |
+| `Normal_doc_仿宋三号加粗` | `cover_text` | 抽象 |
+| `company_name` | `right_text` | 通用化 |
+| `set_cell_format` | `set_cell` | 增强支持加粗/对齐 |
+| `Heading_union` | `cover_text` + `alignment` | 简化 |
+| `insert_new_section` | `insert_section` | 命名一致 |
+
+迁移方式：直接替换方法名即可，参数顺序与默认值保持兼容。
+
+## 注意事项
+
+1. **目录刷新**：`python-docx` 可写入 TOC 域，但目录内容需在 Word/OnlyOffice 打开后刷新（F9 或右键 → 更新域）才会显示页码。
+2. **页码分节**：从某页开始重新编号本质上是"从某个分节开始重新编号"。建议在正文起、附录起等关键节点显式插入分节。
+3. **字体可用性**：默认字体 `仿宋_GB2312` / `楷体` / `黑体` 在 Windows 上预装；macOS / Linux 可能需要额外安装或回退到 `仿宋` / `STKaiti` / `SimHei`。
+4. **私有方法**：`_set_run_font` / `_set_paragraph_basic_format` 等已通过公开别名（`set_run_font` / `set_paragraph_format`）暴露，请优先使用公开 API。
+
+## 测试
+
+```bash
+cd wc_word_report_tool
+PYTHONPATH=src python3 -m pytest tests/ -q
 ```
-
-如果你不是用内置 `Heading 1/2/3`，也可以按自定义段落样式进目录：
-
-```python
-WordFormatter.set_paragraph_style(
-    doc,
-    "MyHeading1",
-    font_name="黑体",
-    font_size=14,
-    bold=True,
-)
-
-WordFormatter.add_toc(
-    doc,
-    custom_style_levels={"MyHeading1": 1},
-    use_outline_levels=True,
-)
-
-WordFormatter.add_custom_heading(
-    doc,
-    "这是自定义样式标题",
-    style_name="MyHeading1",
-    level=1,
-)
-```
-
-## 注意
-
-1. `python-docx` 可以把目录域和页码域写进 `.docx`，但目录内容通常需要在 Word 里打开文档后更新一次。
-2. “从第几页开始重新编号”在技术上是“从某个分节开始重新编号”。如果你说的是按最终排版后的物理页自动识别第 N 页，这件事 `python-docx` 本身不擅长，建议在目标位置手动插入分节，或者在生成逻辑里明确分节点。
-3. 当前我已经补了最小测试文件在 `tests/test_word_formatter.py`，如果你本机装了 `pytest`，可以直接跑：`cd wc_word_report_tool && PYTHONPATH=src python3 -m pytest tests/test_word_formatter.py -q`
 
 ## 打包上传
-
-目录里已经带了 `publish_to_pypi.sh`，典型流程：
 
 ```bash
 cd wc_word_report_tool
 python3 -m pip install --upgrade build twine
 ./publish_to_pypi.sh
 ```
+
+## License
+
+MIT

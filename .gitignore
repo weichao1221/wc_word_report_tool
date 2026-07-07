@@ -1,3 +1,4 @@
 dist/
 .idea/
 wc_word_report_tool.egg-info/
+*.bak/

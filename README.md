@@ -5,7 +5,7 @@
 1. **数字转中文大写**：`number_to_chinese_upper()` 把数字转成人民币金额大写。
 2. **Word 格式化**：`WordFormatter` 提供从封面、正文、表格、页眉页脚到目录、页码的完整覆盖，默认值贴近中国公文标准。
 
-> 版本：v0.4.5
+> 版本：v0.4.7
 > 作者：willcha
 > 许可证：MIT
 > Python：>=3.9
@@ -64,6 +64,7 @@ formatter = WordFormatter(doc)
 # 1. 文档级设置
 formatter.setup_defaults()
 formatter.set_document_language()
+# setup_defaults 只设置页面参数；正文格式通过 body() 单独设置
 
 # 2. 封面
 WordFormatter.insert_img(doc, "logo.png", width=5)
@@ -110,6 +111,7 @@ doc.save("demo.docx")
 | 方法 | 用途 | 备注 |
 |------|------|------|
 | `set_default_font(doc, *, font_size, cn_font, en_font)` | 设置 Normal 样式默认字体 |
+| `setup_defaults(*, top, bottom, left, right, gutter)` | 一键设置默认页边距；不设置正文格式 |
 | `set_document_language(lang)` | 设置 DOCX 文档语言 |
 | `set_page_margins(doc, *, top, bottom, left, right, gutter, horizontal_alignment)` | 页边距 | 替代 `set_all_layout` / `set_document_layout` |
 

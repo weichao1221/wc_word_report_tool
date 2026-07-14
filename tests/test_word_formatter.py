@@ -78,10 +78,24 @@ def test_set_page_margins(tmp_path):
     WordFormatter.set_page_margins(doc, top=2.5, left=2.6)
     out = tmp_path / "margins.docx"
     doc.save(out)
-
     document_xml = _read_zip_xml(out, "word/document.xml")
     assert 'w:top="1417"' in document_xml  # 2.5cm
     assert 'w:left="1474"' in document_xml  # 2.6cm
+
+
+def test_setup_defaults_only_sets_page_margins():
+    doc = Document()
+    formatter = WordFormatter(doc)
+    formatter.setup_defaults(top=3.7, bottom=3.5, left=2.8, right=2.6)
+
+    section = doc.sections[0]
+    assert round(section.top_margin.cm, 1) == 3.7
+    assert round(section.bottom_margin.cm, 1) == 3.5
+    assert round(section.left_margin.cm, 1) == 2.8
+    assert round(section.right_margin.cm, 1) == 2.6
+
+    with pytest.raises(TypeError):
+        formatter.setup_defaults(body_font_name="宋体")
 
 
 # ====================================================================

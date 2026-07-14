@@ -9,7 +9,7 @@
 3. **默认合理**：默认值贴近中国公文标准（仿宋_GB2312、三号 14pt、1.5 倍行距）。
 4. **严格校验**：未知参数抛 ValueError 而非静默降级，便于调试。
 
-版本：v0.4.5
+版本：v0.4.7
 作者：willcha
 """
 
@@ -76,7 +76,7 @@ class WordFormatter:
 
     文档级操作通过 ``WordFormatter(doc)`` 绑定文档后调用；纯工具方法保留为静态方法。
 
-    命名约定（v0.4.4+）
+    命名约定（v0.4.6+）
     ------------------
     - snake_case 全小写：``heading`` / ``body`` / ``set_header``
     - 设置类前缀 ``set_``：``set_cell`` / ``set_header`` / ``set_table_borders``
@@ -388,35 +388,17 @@ class WordFormatter:
         return self.doc
 
     def setup_defaults(self, *, top: float = 3.7, bottom: float = 3.5,
-                       left: float = 2.8, right: float = 2.6, gutter: float = 0,
-                       body_font_name: str = "宋体", body_font_size="四号",
-                       body_line_spacing=1.5, body_indent_chars: float = 2,
-                       alignment="两端对齐"):
-        """一次设置文档页边距和 Normal 正文样式。
+                       left: float = 2.8, right: float = 2.6, gutter: float = 0):
+        """一次设置文档的默认页面参数。
 
         :param top/bottom/left/right: 页边距，单位 cm。
         :param gutter: 装订线，单位 cm。
-        :param body_font_name: 正文字体名称。
-        :param body_font_size: 正文大小，支持中文字号字符串。
-        :param body_line_spacing: 正文行距倍数。
-        :param body_indent_chars: 正文首行缩进字符数，默认 2。
-        :param alignment: 正文对齐方式，支持中文、英文、单字母、数字和对齐枚举。
+
+        正文字体、字号、行距、缩进和对齐请通过 ``body()`` 或
+        ``set_default_font()`` 单独设置。
         """
         self.set_page_margins(
             top=top, bottom=bottom, left=left, right=right, gutter=gutter,
-        )
-        self.set_default_font(
-            font_size=body_font_size, cn_font=body_font_name,
-        )
-        normal = self.doc.styles["Normal"]
-        normal.paragraph_format.line_spacing = body_line_spacing
-        normal.paragraph_format.space_before = Pt(0)
-        normal.paragraph_format.space_after = Pt(0)
-        normal.paragraph_format.first_line_indent = Pt(
-            _to_pt(body_font_size) * body_indent_chars
-        )
-        normal.paragraph_format.alignment = self.resolve_alignment(
-            alignment, strict=True,
         )
         return self.doc
 

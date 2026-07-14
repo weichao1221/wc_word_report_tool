@@ -5,7 +5,7 @@
 1. **数字转中文大写**：`number_to_chinese_upper()` 把数字转成人民币金额大写。
 2. **Word 格式化**：`WordFormatter` 提供从封面、正文、表格、页眉页脚到目录、页码的完整覆盖，默认值贴近中国公文标准。
 
-> 版本：v0.4.5
+> 版本：v0.2.0
 > 作者：willcha
 > 许可证：MIT
 > Python：>=3.9
@@ -31,24 +31,15 @@ print(number_to_chinese_upper(123456.78))
 wc-rmb-upper 100200.03
 ```
 
-## 设计理念（v0.4.3）
+## 设计理念（v0.2.0 重构说明）
 
-v0.4.3 对 API 做了收敛，目标：
+v0.2.0 对 API 做了系统性重构，目标：
 
 1. **覆盖完整**：补齐表格、页眉页脚、文档默认样式等 v0.1.x 缺失能力。
-2. **命名一致**：所有新方法使用 snake_case（`heading` / `body` / `set_header`），告别拼音 + 大小写混杂。
+2. **命名一致**：所有新方法使用 snake_case（`heading1` / `body` / `set_header`），告别拼音 + 大小写混杂。
 3. **默认合理**：默认值贴近公文标准（仿宋_GB2312、三号 14pt、1.5 倍行距）。
 4. **严格校验**：未知对齐方式抛 `ValueError` 而非静默降级，便于调试。
-
-格式化器在创建时绑定文档，后续方法不再重复传入 `doc`：
-
-```python
-formatter = WordFormatter(doc)
-formatter.cover_text("项目名称")
-formatter.heading("一、项目概况")
-formatter.body("正文内容")
-formatter.add_toc()
-```
+5. **向后兼容**：v0.1.x 的旧 API（`Heading_1` / `Normal_doc` / `fengmian_doc1` 等）保留为别名，调用时发 `DeprecationWarning`，已有代码无需修改即可升级。
 
 ## 快速上手
 
@@ -59,24 +50,27 @@ from docx import Document
 from wc_word_report_tool import WordFormatter
 
 doc = Document()
-formatter = WordFormatter(doc)
 
 # 1. 文档级设置
-formatter.setup_defaults()
+WordFormatter.set_default_font(doc, font_size="三号",
+                               cn_font="仿宋_GB2312", en_font="Times New Roman")
+WordFormatter.set_language(doc, "zh-CN")
+WordFormatter.set_page_margins(doc, top=2.54, bottom=2.54, left=3.17, right=3.17)
 
 # 2. 封面
 WordFormatter.insert_img(doc, "logo.png", width=5)
 WordFormatter.blank_lines(doc, 2)
-formatter.cover_text("测试项目", font_name="宋体", font_size=22, bold=True)
+WordFormatter.cover_text(doc, "测试项目", font_name="宋体", font_size=22, bold=True)
 WordFormatter.blank_lines(doc, 8)
 WordFormatter.right_text(doc, "委托单位：XXX公司")
 WordFormatter.right_text(doc, "编制单位：YYY公司")
 
 # 3. 正文（新节）
-formatter.insert_section()
-formatter.heading("1. 概述")
-formatter.body("本项目位于……，建设内容包括……")
-formatter.body("项目背景说明……")
+WordFormatter.insert_section(doc)
+WordFormatter.heading1(doc, "1. 概述")
+WordFormatter.body(doc, "本项目位于……，建设内容包括……")
+WordFormatter.heading2(doc, "1.1 项目背景")
+WordFormatter.body(doc, "项目背景说明……")
 
 # 4. 表格
 WordFormatter.add_table(
@@ -93,11 +87,11 @@ WordFormatter.add_table(
 
 # 5. 页眉页脚 + 页码从正文开始
 WordFormatter.set_header(doc.sections[1], "测试项目 竣工决算报告", alignment="居中")
-formatter.set_page_number_from_section(start_section_idx=1, start=1,
+WordFormatter.set_page_number_from_section(doc, start_section_idx=1, start=1,
                                             prefix="第 ", suffix=" 页")
 
 # 6. 目录
-formatter.add_toc(title="目  录", levels=(1, 3))
+WordFormatter.add_toc(doc, title="目  录", levels=(1, 3))
 
 doc.save("demo.docx")
 ```
@@ -108,25 +102,25 @@ doc.save("demo.docx")
 
 | 方法 | 用途 | 备注 |
 |------|------|------|
-| `set_default_font(doc, *, font_size, cn_font, en_font)` | 设置 Normal 样式默认字体 |
-| `set_language(doc, lang)` | 设置文档语言 |
+| `set_default_font(doc, *, font_size, cn_font, en_font)` | 设置 Normal 样式默认字体 | v0.2.0 新增 |
+| `set_language(doc, lang)` | 设置文档语言 | v0.2.0 新增 |
 | `set_page_margins(doc, *, top, bottom, left, right, gutter, horizontal_alignment)` | 页边距 | 替代 `set_all_layout` / `set_document_layout` |
 
 ### 段落与标题
 
 | 方法 | 用途 |
 |------|------|
-| `body(text, *, font_name, font_size, indent, bold, highlight, alignment)` | 正文段落（首行缩进 + 1.5 倍行距） |
+| `body(doc, text, *, font_name, font_size, indent, alignment)` | 正文段落（首行缩进 + 1.5 倍行距） |
 | `blank_lines(doc, count)` | 批量空行 |
-| `heading(text, *, level, font_name, font_size, bold)` | 通用标题（默认一级标题格式） |
-| `cover_text(doc, text, *, font_name, font_size, bold)` | 封面文本（居中） |
+| `heading1(doc, text, *, font_name, font_size)` | 一级标题（黑体 16pt） |
+| `heading2(doc, text, *, font_name, font_size)` | 二级标题（仿宋 14pt 加粗） |
+| `heading3(doc, text, *, font_name, font_size)` | 三级标题（仿宋 14pt） |
+| `cover_text(doc, text, *, font_name, font_size, bold)` | 封面文本（居中），替代 `fengmian_doc1/2/3` |
 | `right_text(doc, text, *, font_name, font_size, indent)` | 右对齐段落（公司名/日期） |
-| `created_time(doc, value, *, font_name, font_size, bold)` | 数字日期文本，默认右对齐 |
-| `chinese_date(doc, value, *, font_name, font_size, bold, alignment)` | 中文完整日期，默认居中 |
-| `chinese_year_month(doc, value, *, font_name, font_size, bold, alignment)` | 中文年月，默认居中 |
+| `created_time(doc, value, *, font_name, font_size)` | 日期文本（None=今天） |
 | `insert_img(doc, img_path, width, *, alignment)` | 插入图片（width 单位 cm） |
 
-### 表格
+### 表格（v0.2.0 新增）
 
 | 方法 | 用途 |
 |------|------|
@@ -145,20 +139,17 @@ WordFormatter.add_table(
 )
 ```
 
-### 页眉页脚
+### 页眉页脚（v0.2.0 新增）
 
 | 方法 | 用途 |
 |------|------|
 | `set_header(section, text, *, alignment, font_name, font_size)` | 设置节页眉（默认楷体小五号） |
 | `set_footer(section, text, *, alignment, font_name, font_size)` | 设置节页脚（默认楷体小五号） |
 | `clear_header(section)` / `clear_footer(section)` | 清空节页眉/页脚 |
-| `set_header_image(section, image_path, *, width, height, alignment)` | 设置页眉图片 |
-| `set_footer_image(section, image_path, *, width, height, alignment)` | 设置页脚图片 |
 
 ```python
 WordFormatter.set_header(doc.sections[1], "项目名称 报告名称", alignment="居中")
 WordFormatter.set_footer(doc.sections[1], "编制单位名称", alignment="居右")
-WordFormatter.set_header_image(doc.sections[1], "logo.png", width=3)
 ```
 
 ### 节与页码
@@ -186,13 +177,14 @@ WordFormatter.set_page_number_from_section(
 
 | 方法 | 用途 |
 |------|------|
-| `add_toc(*, title, levels, toc_level_styles, ...)` | 插入 Word 目录域（TOC field） |
-| `set_toc_level_style(level, *, font_name, ...)` | 设置某一级 TOC 样式 |
-| `set_paragraph_style(style_name, *, base_style_name, ...)` | 创建/更新自定义段落样式 |
-| `add_custom_heading(text, *, style_name, level, ...)` | 使用自定义样式添加标题 |
+| `add_toc(doc, *, title, levels, toc_level_styles, ...)` | 插入 Word 目录域（TOC field） |
+| `set_toc_level_style(doc, level, *, font_name, ...)` | 设置某一级 TOC 样式 |
+| `set_paragraph_style(doc, style_name, *, base_style_name, ...)` | 创建/更新自定义段落样式 |
+| `add_custom_heading(doc, text, *, style_name, level, ...)` | 使用自定义样式添加标题 |
 
 ```python
-formatter.add_toc(
+WordFormatter.add_toc(
+    doc,
     title="目  录",
     levels=(1, 3),
     toc_level_styles={
@@ -200,7 +192,8 @@ formatter.add_toc(
         2: {"font_name": "仿宋_GB2312", "font_size": 12, "left_indent": 24},
     },
 )
-formatter.heading("1. 一级标题")
+WordFormatter.heading1(doc, "1. 一级标题")
+WordFormatter.heading2(doc, "1.1 二级标题")
 ```
 
 ### 底层工具方法
@@ -226,7 +219,7 @@ formatter.heading("1. 一级标题")
 
 | 类型 | 示例 |
 |------|------|
-| 中文 | `"居中"` / `"居左"` / `"居右"` / `"左对齐"` / `"右对齐"` / `"两端对齐"` |
+| 中文 | `"居中"` / `"居左"` / `"居右"` / `"两端对齐"` |
 | 英文 | `"center"` / `"left"` / `"right"` / `"justify"` |
 | 单字母 | `"C"` / `"L"` / `"R"` |
 | 数字 | `1` / `2` / `3` |
@@ -247,16 +240,31 @@ formatter.heading("1. 一级标题")
 | `first_line_indent_pt` | pt |
 | `border_size`（边框粗细） | 1/8 pt（4 = 0.5pt 细线，8 = 1pt） |
 
-## 版本说明
+## 向后兼容（v0.1.x → v0.2.0 迁移指南）
 
-v0.4.3 起只保留当前 API，不提供旧方法名兼容层。常用入口为
-`setup_defaults`、`cover_text`、`heading`、`body` 和日期方法。
+旧 API 仍可用，调用时发 `DeprecationWarning`：
+
+| 旧 API | 新 API | 备注 |
+|--------|--------|------|
+| `set_all_layout` / `set_document_layout` | `set_page_margins` | 合并 |
+| `fengmian_doc1` / `fengmian_doc2` / `fengmian_doc3` | `cover_text` | 统一为参数化方法 |
+| `Heading_1` / `Heading_2` / `Heading_3` | `heading1` / `heading2` / `heading3` | snake_case |
+| `Normal_doc` | `body` | 语义更清晰 |
+| `Normal_doc_Highlight` | `body` + run 高亮 | 拆分 |
+| `Normal_doc_仿宋三号加粗` | `cover_text` | 抽象 |
+| `company_name` | `right_text` | 通用化 |
+| `set_cell_format` | `set_cell` | 增强支持加粗/对齐 |
+| `Heading_union` | `cover_text` + `alignment` | 简化 |
+| `insert_new_section` | `insert_section` | 命名一致 |
+
+迁移方式：直接替换方法名即可，参数顺序与默认值保持兼容。
 
 ## 注意事项
 
 1. **目录刷新**：`python-docx` 可写入 TOC 域，但目录内容需在 Word/OnlyOffice 打开后刷新（F9 或右键 → 更新域）才会显示页码。
 2. **页码分节**：从某页开始重新编号本质上是"从某个分节开始重新编号"。建议在正文起、附录起等关键节点显式插入分节。
 3. **字体可用性**：默认字体 `仿宋_GB2312` / `楷体` / `黑体` 在 Windows 上预装；macOS / Linux 可能需要额外安装或回退到 `仿宋` / `STKaiti` / `SimHei`。
+4. **私有方法**：`_set_run_font` / `_set_paragraph_basic_format` 等已通过公开别名（`set_run_font` / `set_paragraph_format`）暴露，请优先使用公开 API。
 
 ## 测试
 

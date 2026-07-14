@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "wc_word_report_tool"
-version = "0.4.5"
-description = "Chinese Word report formatter: tables, headers/footers, TOC, page numbering, cover, headings."
+version = "0.1.1"
+description = "Word report helpers with page numbering, table of contents, and Chinese uppercase number conversion."
 readme = "README.md"
 requires-python = ">=3.9"
 license = "MIT"
@@ -17,7 +17,7 @@ dependencies = [
 ]
 keywords = ["word", "docx", "chinese", "rmb", "formatter"]
 classifiers = [
-  "Development Status :: 4 - Beta",
+  "Development Status :: 3 - Alpha",
   "Intended Audience :: Developers",
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3 :: Only",

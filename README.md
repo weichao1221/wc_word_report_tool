@@ -63,6 +63,7 @@ formatter = WordFormatter(doc)
 
 # 1. 文档级设置
 formatter.setup_defaults()
+formatter.set_document_language()
 
 # 2. 封面
 WordFormatter.insert_img(doc, "logo.png", width=5)
@@ -109,7 +110,7 @@ doc.save("demo.docx")
 | 方法 | 用途 | 备注 |
 |------|------|------|
 | `set_default_font(doc, *, font_size, cn_font, en_font)` | 设置 Normal 样式默认字体 |
-| `set_language(doc, lang)` | 设置文档语言 |
+| `set_document_language(lang)` | 设置 DOCX 文档语言 |
 | `set_page_margins(doc, *, top, bottom, left, right, gutter, horizontal_alignment)` | 页边距 | 替代 `set_all_layout` / `set_document_layout` |
 
 ### 段落与标题

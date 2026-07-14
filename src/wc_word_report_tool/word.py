@@ -391,8 +391,8 @@ class WordFormatter:
                        left: float = 2.8, right: float = 2.6, gutter: float = 0,
                        body_font_name: str = "宋体", body_font_size="四号",
                        body_line_spacing=1.5, body_indent_chars: float = 2,
-                       alignment="两端对齐", language: str = "zh-CN"):
-        """一次设置文档页边距、Normal 正文样式和文档语言。
+                       alignment="两端对齐"):
+        """一次设置文档页边距和 Normal 正文样式。
 
         :param top/bottom/left/right: 页边距，单位 cm。
         :param gutter: 装订线，单位 cm。
@@ -401,7 +401,6 @@ class WordFormatter:
         :param body_line_spacing: 正文行距倍数。
         :param body_indent_chars: 正文首行缩进字符数，默认 2。
         :param alignment: 正文对齐方式，支持中文、英文、单字母、数字和对齐枚举。
-        :param language: 文档语言标签，默认 ``"zh-CN"``。
         """
         self.set_page_margins(
             top=top, bottom=bottom, left=left, right=right, gutter=gutter,
@@ -419,33 +418,27 @@ class WordFormatter:
         normal.paragraph_format.alignment = self.resolve_alignment(
             alignment, strict=True,
         )
-        self.set_language(language)
         return self.doc
 
-    def set_language(self, lang: str = "zh-CN"):
-        """设置文档语言（影响拼写检查、字体回退、目录排序）。
+    def set_document_language(self, lang: str = "zh-CN"):
+        """设置 DOCX 默认校对语言，避免 Word/OnlyOffice 显示 English。
 
-        :param lang: BCP 47 语言标签，默认 "zh-CN"
+        :param lang: BCP 47 语言标签，默认 ``"zh-CN"``。
         """
-        settings = self.doc.settings.element
+        styles = self.doc.styles.element
+        for lang_element in styles.xpath(".//w:lang"):
+            lang_element.set(qn("w:val"), lang)
+            lang_element.set(qn("w:eastAsia"), lang)
+            lang_element.set(qn("w:bidi"), lang)
 
+        settings = self.doc.settings.element
         theme_font_lang = settings.find(qn("w:themeFontLang"))
         if theme_font_lang is None:
             theme_font_lang = OxmlElement("w:themeFontLang")
-            settings.append(theme_font_lang)
+            settings.insert(0, theme_font_lang)
         theme_font_lang.set(qn("w:val"), lang)
         theme_font_lang.set(qn("w:eastAsia"), lang)
         theme_font_lang.set(qn("w:bidi"), lang)
-
-        for style in self.doc.styles:
-            rPr = style.element.get_or_add_rPr()
-            lang_el = rPr.find(qn("w:lang"))
-            if lang_el is None:
-                lang_el = OxmlElement("w:lang")
-                rPr.append(lang_el)
-            lang_el.set(qn("w:val"), lang)
-            lang_el.set(qn("w:eastAsia"), lang)
-            lang_el.set(qn("w:bidi"), lang)
         return self.doc
 
     def set_page_margins(self, *, top: float = 2.54, bottom: float = 2.54,
@@ -761,6 +754,36 @@ class WordFormatter:
             run._r.getparent().remove(run._r)
         run = paragraph.add_run(text)
         WordFormatter.set_run_font(run, cn_font=font_name, size=font_size, bold=bold)
+        return cell
+
+    @staticmethod
+    def edit_cell(table, context: str | list[str], row: int, col: int, *,
+                  font_name: str = "宋体", font_size="小三",
+                  bold: bool = False):
+        """编辑表格指定单元格，支持一个单元格写入多行内容。
+
+        :param table: 目标表格。
+        :param context: 单元格内容，可以是字符串或字符串列表；列表项逐行写入。
+        :param row: 行索引，从 0 开始。
+        :param col: 列索引，从 0 开始。
+        :param font_name: 中文字体名称。
+        :param font_size: 字号，支持中文字号字符串。
+        :param bold: 是否加粗，默认否。
+        :return: 编辑后的单元格。
+        """
+        cell = table.cell(row, col)
+        paragraph = cell.paragraphs[0]
+        paragraph.clear()
+        texts = context if isinstance(context, list) else [context]
+
+        for index, text in enumerate(texts):
+            run = paragraph.add_run(str(text))
+            WordFormatter.set_run_font(
+                run, cn_font=font_name, en_font="Times New Roman",
+                size=font_size, bold=bold,
+            )
+            if index < len(texts) - 1:
+                run.add_break()
         return cell
 
     def add_table(self, headers, rows, *, col_widths=None, font_size=12,

@@ -5,7 +5,7 @@
 1. **数字转中文大写**：`number_to_chinese_upper()` 把数字转成人民币金额大写。
 2. **Word 格式化**：`WordFormatter` 提供从封面、正文、表格、页眉页脚到目录、页码的完整覆盖，默认值贴近中国公文标准。
 
-> 版本：v0.4.7
+> 版本：v0.4.8
 > 作者：willcha
 > 许可证：MIT
 > Python：>=3.9
@@ -168,7 +168,7 @@ WordFormatter.set_header_image(doc.sections[1], "logo.png", width=3)
 
 | 方法 | 用途 |
 |------|------|
-| `insert_section(doc, start_type)` | 插入新节 |
+| `insert_section(start_type, *, add_page_number, restart_page_number, inherit_header, inherit_footer)` | 插入新节并控制页眉页脚继承 |
 | `set_page_number_start(section, start)` | 设置节页码起始值 |
 | `add_page_number(paragraph, *, prefix, suffix, alignment, font_name, font_size)` | 向段落添加 PAGE 域 |
 | `add_footer_page_number(section, *, prefix, suffix, ...)` | 节页脚添加页码 |

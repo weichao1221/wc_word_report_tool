@@ -9,7 +9,7 @@
 3. **默认合理**：默认值贴近中国公文标准（仿宋_GB2312、三号 14pt、1.5 倍行距）。
 4. **严格校验**：未知参数抛 ValueError 而非静默降级，便于调试。
 
-版本：v0.4.7
+版本：v0.4.8
 作者：willcha
 """
 
@@ -954,6 +954,8 @@ class WordFormatter:
                        add_page_number: bool = False,
                        restart_page_number: bool = False,
                        start_page_number: int = 1,
+                       inherit_header: bool = True,
+                       inherit_footer: bool = True,
                        prefix: str = "", suffix: str = "",
                        alignment="居中", font_name: str | None = None,
                        font_size=None):
@@ -966,6 +968,8 @@ class WordFormatter:
         :param add_page_number: 是否设置页码，默认否。
         :param restart_page_number: 是否重新开始编号，默认否。
         :param start_page_number: 重新编号的起始页码，默认 1。
+        :param inherit_header: 是否继承上一节页眉，默认是。
+        :param inherit_footer: 是否继承上一节页脚，默认是；重新开始页码时会由本节页码覆盖。
         :param prefix: 页码前缀。
         :param suffix: 页码后缀。
         :param alignment: 页码对齐方式，默认居中，支持中文、英文、单字母、数字和对齐枚举。
@@ -982,6 +986,11 @@ class WordFormatter:
                 effective_start_type = WD_SECTION_START.CONTINUOUS
 
         section = self.doc.add_section(start_type=effective_start_type)
+        if inherit_header:
+            section.header.is_linked_to_previous = True
+        else:
+            self.clear_header(section)
+
         if add_page_number:
             if restart_page_number:
                 self.restart_page_numbering(
@@ -989,10 +998,17 @@ class WordFormatter:
                     prefix=prefix, suffix=suffix, alignment=alignment,
                     font_name=font_name, font_size=font_size,
                 )
-            else:
+            elif inherit_footer:
                 section.footer.is_linked_to_previous = True
+            else:
+                # 不继承页脚时，仍在本节添加连续编号的页码。
+                self.add_footer_page_number(
+                    section, prefix=prefix, suffix=suffix, alignment=alignment,
+                    font_name=font_name, font_size=font_size,
+                )
+        elif inherit_footer:
+            section.footer.is_linked_to_previous = True
         else:
-            # 新节默认不继承页脚，避免上一节的页码或空段落带过来。
             self.clear_footer(section)
         return section
 

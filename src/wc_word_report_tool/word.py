@@ -9,7 +9,7 @@
 3. **默认合理**：默认值贴近中国公文标准（仿宋_GB2312、三号 14pt、1.5 倍行距）。
 4. **严格校验**：未知参数抛 ValueError 而非静默降级，便于调试。
 
-版本：v0.4.9
+版本：v0.4.13
 作者：willcha
 """
 
@@ -813,7 +813,9 @@ class WordFormatter:
     @staticmethod
     def set_header(section, text: str, *, alignment="居中",
                    font_name: str = DEFAULT_HEADER_FOOTER_FONT,
-                   font_size=DEFAULT_HEADER_FOOTER_SIZE):
+                   font_size=DEFAULT_HEADER_FOOTER_SIZE,
+                   bottom_border: bool = True, line_length=None,
+                   line_alignment="居左"):
         """设置指定节的页眉文本（默认楷体小五号）。
 
         :param section: 目标节。
@@ -823,13 +825,17 @@ class WordFormatter:
         :param font_size: 字号，支持中文字号字符串。
         """
         return WordFormatter._fill_header_footer_part(
-            section.header, text, alignment, font_name, font_size
+            section.header, text, alignment, font_name, font_size,
+            bottom_border=bottom_border, section=section,
+            line_length=line_length, line_alignment=line_alignment,
         )
 
     @staticmethod
     def set_footer(section, text: str, *, alignment="居中",
                    font_name: str = DEFAULT_HEADER_FOOTER_FONT,
-                   font_size=DEFAULT_HEADER_FOOTER_SIZE):
+                   font_size=DEFAULT_HEADER_FOOTER_SIZE,
+                   bottom_border: bool = True, line_length=None,
+                   line_alignment="居左"):
         """设置指定节的页脚文本（默认楷体小五号）。
 
         :param section: 目标节。
@@ -840,12 +846,17 @@ class WordFormatter:
         :note: 页码请使用 add_footer_page_number 或 set_page_number_from_section。
         """
         return WordFormatter._fill_header_footer_part(
-            section.footer, text, alignment, font_name, font_size
+            section.footer, text, alignment, font_name, font_size,
+            bottom_border=bottom_border, section=section,
+            line_length=line_length, line_alignment=line_alignment,
         )
 
     @staticmethod
     def set_header_image(section, image_path, *, width: float | None = None,
-                         height: float | None = None, alignment="居中"):
+                         height: float | None = None, alignment="居中",
+                         floating: bool = True, bottom_border: bool = True,
+                         line_length=None, line_alignment="居左",
+                         y_offset_pt: float = 0):
         """设置页眉图片；已有文字会保留，已有图片会被替换。
 
         :param section: 目标节。
@@ -856,12 +867,18 @@ class WordFormatter:
         """
         return WordFormatter._set_header_footer_image(
             section.header, image_path, width=width, height=height,
-            alignment=alignment,
+            alignment=alignment, floating=floating,
+            bottom_border=bottom_border, section=section,
+            line_length=line_length, line_alignment=line_alignment,
+            y_offset_pt=y_offset_pt,
         )
 
     @staticmethod
     def set_footer_image(section, image_path, *, width: float | None = None,
-                         height: float | None = None, alignment="居中"):
+                         height: float | None = None, alignment="居中",
+                         floating: bool = True, bottom_border: bool = True,
+                         line_length=None, line_alignment="居左",
+                         y_offset_pt: float = 0):
         """设置页脚图片；已有文字会保留，已有图片会被替换。
 
         :param section: 目标节。
@@ -872,12 +889,18 @@ class WordFormatter:
         """
         return WordFormatter._set_header_footer_image(
             section.footer, image_path, width=width, height=height,
-            alignment=alignment,
+            alignment=alignment, floating=floating,
+            bottom_border=bottom_border, section=section,
+            line_length=line_length, line_alignment=line_alignment,
+            y_offset_pt=y_offset_pt,
         )
 
     @staticmethod
     def _set_header_footer_image(part, image_path, *, width=None, height=None,
-                                 alignment="居中"):
+                                 alignment="居中", floating=False,
+                                 bottom_border=False, section=None,
+                                 line_length=None, line_alignment="居左",
+                                 y_offset_pt=0):
         path = Path(image_path)
         if not path.is_file():
             raise FileNotFoundError(f"页眉页脚图片不存在: {path}")
@@ -903,10 +926,19 @@ class WordFormatter:
         if height is not None:
             kwargs["height"] = Cm(height)
         run.add_picture(str(path), **kwargs)
+        if floating:
+            WordFormatter._make_run_floating(run, y_offset_pt=y_offset_pt)
+        if bottom_border:
+            WordFormatter._set_bottom_border(
+                paragraph, section=section, line_length=line_length,
+                line_alignment=line_alignment,
+            )
         return part
 
     @staticmethod
-    def _fill_header_footer_part(part, text, alignment, font_name, font_size):
+    def _fill_header_footer_part(part, text, alignment, font_name, font_size,
+                                 *, bottom_border=False, section=None,
+                                 line_length=None, line_alignment="居左"):
         """页眉/页脚共用填充实现，保留已有图片。"""
         part.is_linked_to_previous = False
         paragraph = part.paragraphs[0] if part.paragraphs else part.add_paragraph()
@@ -924,7 +956,96 @@ class WordFormatter:
                 run, cn_font=font_name, en_font=DEFAULT_EN_FONT,
                 size=font_size, bold=False, color=(0, 0, 0),
             )
+        if bottom_border:
+            WordFormatter._set_bottom_border(
+                paragraph, section=section, line_length=line_length,
+                line_alignment=line_alignment,
+            )
         return part
+
+    @staticmethod
+    def _set_bottom_border(paragraph, *, section=None, line_length=None,
+                           line_alignment="居左", border_color="auto"):
+        """给页眉/页脚段落增加底部横线。"""
+        p_pr = paragraph._p.get_or_add_pPr()
+        p_bdr = p_pr.find(qn("w:pBdr"))
+        if p_bdr is None:
+            p_bdr = OxmlElement("w:pBdr")
+            p_pr.append(p_bdr)
+        bottom = p_bdr.find(qn("w:bottom"))
+        if bottom is None:
+            bottom = OxmlElement("w:bottom")
+            p_bdr.append(bottom)
+        bottom.set(qn("w:val"), "single")
+        bottom.set(qn("w:sz"), "6")
+        bottom.set(qn("w:space"), "1")
+        if isinstance(border_color, tuple):
+            border_color = "%02X%02X%02X" % border_color
+        bottom.set(qn("w:color"), border_color)
+        if section is not None:
+            page_width = section.page_width.cm
+            available_width = page_width - section.left_margin.cm - section.right_margin.cm
+            length = available_width if line_length is None else max(0, min(float(line_length), available_width))
+            remaining = available_width - length
+            if line_alignment in ("居右", "右对齐", "right", "R"):
+                paragraph.paragraph_format.left_indent = Cm(remaining)
+                paragraph.paragraph_format.right_indent = Cm(0)
+            elif line_alignment in ("居中", "居中对齐", "center", "C"):
+                paragraph.paragraph_format.left_indent = Cm(remaining / 2)
+                paragraph.paragraph_format.right_indent = Cm(remaining / 2)
+            else:
+                paragraph.paragraph_format.left_indent = Cm(0)
+                paragraph.paragraph_format.right_indent = Cm(remaining)
+
+    @staticmethod
+    def _make_run_floating(run, *, y_offset_pt: float = 0):
+        """将图片 run 从行内对象转换为浮动对象，允许文字覆盖在图片旁边。"""
+        inline = run._r.xpath(".//wp:inline")
+        if not inline:
+            return
+        inline = inline[0]
+        extent = inline.find(qn("wp:extent"))
+        image_height = int(extent.get("cy", "0")) if extent is not None else 0
+        anchor = OxmlElement("wp:anchor")
+        for name, value in {
+            "distT": "0", "distB": "0", "distL": "0", "distR": "0",
+            "simplePos": "0", "relativeHeight": "251658240",
+            "behindDoc": "0", "locked": "0", "layoutInCell": "1",
+            "allowOverlap": "1",
+        }.items():
+            anchor.set(qn(f"wp:{name}"), value)
+
+        simple_pos = OxmlElement("wp:simplePos")
+        simple_pos.set("x", "0")
+        simple_pos.set("y", "0")
+        anchor.append(simple_pos)
+
+        for tag in ("positionH", "positionV"):
+            position = OxmlElement(f"wp:{tag}")
+            position.set(
+                "relativeFrom",
+                "column" if tag == "positionH" else "line",
+            )
+            offset = OxmlElement("wp:posOffset")
+            # 以文字行的中线作为图片中心，避免图片默认偏低。
+            if tag == "positionH":
+                offset.text = "0"
+            else:
+                # Word 坐标单位为 EMU；正数 y_offset_pt 表示向上。
+                offset_emu = -(image_height // 2) - round(float(y_offset_pt) * 12700)
+                offset.text = str(offset_emu)
+            position.append(offset)
+            anchor.append(position)
+
+        for child in list(inline):
+            anchor.append(child)
+        effect_extent = OxmlElement("wp:effectExtent")
+        for name in ("l", "t", "r", "b"):
+            effect_extent.set(name, "0")
+        anchor.insert(4, effect_extent)
+        wrap_none = OxmlElement("wp:wrapNone")
+        anchor.insert(5, wrap_none)
+        inline.getparent().replace(inline, anchor)
 
     @staticmethod
     def clear_footer(section):
@@ -1267,8 +1388,13 @@ class WordFormatter:
         return par
 
     def add_toc(self, *, title: str = "目录", levels: tuple[int, int] = (1, 3),
+                title_style: str = "Normal",
                 title_font_name: str = "黑体", title_font_size=16,
                 title_bold: bool = True, title_alignment="居中",
+                title_color: tuple[int, int, int] | None = None,
+                title_bottom_border: bool = False,
+                title_border_color: tuple[int, int, int] | None = None,
+                title_border_length: float | None = None,
                 toc_level_styles: dict[int, dict] | None = None,
                 use_hyperlinks: bool = True, hide_page_numbers_in_web: bool = True,
                 use_outline_levels: bool = True,
@@ -1281,10 +1407,15 @@ class WordFormatter:
 
         :param title: 目录标题，None 时不生成标题。
         :param levels: 收集的标题层级范围，如 ``(1, 3)``。
+        :param title_style: 目录标题使用的段落样式，默认 ``"Normal"``，避免模板 ``Title`` 样式自带下划线。
         :param title_font_name: 标题字体名称。
         :param title_font_size: 标题字号，支持中文字号字符串。
         :param title_bold: 目录标题是否加粗。
         :param title_alignment: 目录标题对齐方式。
+        :param title_color: 目录标题颜色，RGB 元组，如 ``(31, 78, 121)``。
+        :param title_bottom_border: 是否为目录标题添加底部横线。
+        :param title_border_color: 横线颜色，RGB 元组。
+        :param title_border_length: 横线长度，单位 cm；默认使用页面可用宽度。
         :param toc_level_styles: 各级 TOC 样式配置，格式为 ``{层级: 参数字典}``。
         :param use_hyperlinks: 是否生成超链接，默认是。
         :param hide_page_numbers_in_web: 网页模式是否隐藏页码，默认是。
@@ -1300,7 +1431,7 @@ class WordFormatter:
         self._ensure_update_fields_on_open()
 
         if title:
-            title_par = self.doc.add_paragraph(title, style="Title")
+            title_par = self.doc.add_paragraph(title, style=title_style)
             self.set_paragraph_format(
                 title_par,
                 alignment=self.resolve_alignment(title_alignment),
@@ -1309,7 +1440,13 @@ class WordFormatter:
             if title_par.runs:
                 self.set_run_font(
                     title_par.runs[0], cn_font=title_font_name,
-                    size=title_font_size, bold=title_bold,
+                    size=title_font_size, bold=title_bold, color=title_color,
+                )
+            if title_bottom_border:
+                self._set_bottom_border(
+                    title_par, section=self.doc.sections[0],
+                    line_length=title_border_length, line_alignment="居中",
+                    border_color=title_border_color or "auto",
                 )
 
         if toc_level_styles:

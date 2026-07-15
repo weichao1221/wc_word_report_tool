@@ -5,7 +5,7 @@
 1. **数字转中文大写**：`number_to_chinese_upper()` 把数字转成人民币金额大写。
 2. **Word 格式化**：`WordFormatter` 提供从封面、正文、表格、页眉页脚到目录、页码的完整覆盖，默认值贴近中国公文标准。
 
-> 版本：v0.4.9
+> 版本：v0.4.13
 > 作者：willcha
 > 许可证：MIT
 > Python：>=3.9
@@ -155,8 +155,8 @@ WordFormatter.add_table(
 | `set_header(section, text, *, alignment, font_name, font_size)` | 设置节页眉（默认楷体小五号） |
 | `set_footer(section, text, *, alignment, font_name, font_size)` | 设置节页脚（默认楷体小五号） |
 | `clear_header(section)` / `clear_footer(section)` | 清空节页眉/页脚 |
-| `set_header_image(section, image_path, *, width, height, alignment)` | 设置页眉图片 |
-| `set_footer_image(section, image_path, *, width, height, alignment)` | 设置页脚图片 |
+| `set_header_image(section, image_path, *, width, height, alignment, floating, bottom_border, y_offset_pt)` | 设置页眉图片；可浮于文字上方并调整垂直位置 |
+| `set_footer_image(section, image_path, *, width, height, alignment, floating, bottom_border, y_offset_pt)` | 设置页脚图片；可浮于文字上方并调整垂直位置 |
 
 ```python
 WordFormatter.set_header(doc.sections[1], "项目名称 报告名称", alignment="居中")
@@ -189,7 +189,7 @@ WordFormatter.set_page_number_from_section(
 
 | 方法 | 用途 |
 |------|------|
-| `add_toc(*, title, levels, toc_level_styles, ...)` | 插入 Word 目录域（TOC field） |
+| `add_toc(*, title, levels, title_style, toc_level_styles, ...)` | 插入 Word 目录域（TOC field）；标题默认使用 Normal 样式 |
 | `set_toc_level_style(level, *, font_name, ...)` | 设置某一级 TOC 样式 |
 | `set_paragraph_style(style_name, *, base_style_name, ...)` | 创建/更新自定义段落样式 |
 | `add_custom_heading(text, *, style_name, level, ...)` | 使用自定义样式添加标题 |

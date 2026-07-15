@@ -9,7 +9,7 @@
 3. **默认合理**：默认值贴近中国公文标准（仿宋_GB2312、三号 14pt、1.5 倍行距）。
 4. **严格校验**：未知参数抛 ValueError 而非静默降级，便于调试。
 
-版本：v0.4.8
+版本：v0.4.9
 作者：willcha
 """
 
@@ -846,7 +846,7 @@ class WordFormatter:
     @staticmethod
     def set_header_image(section, image_path, *, width: float | None = None,
                          height: float | None = None, alignment="居中"):
-        """设置页眉图片，默认替换原页眉内容。
+        """设置页眉图片；已有文字会保留，已有图片会被替换。
 
         :param section: 目标节。
         :param image_path: 图片路径，必须存在。
@@ -862,7 +862,7 @@ class WordFormatter:
     @staticmethod
     def set_footer_image(section, image_path, *, width: float | None = None,
                          height: float | None = None, alignment="居中"):
-        """设置页脚图片，默认替换原页脚内容。
+        """设置页脚图片；已有文字会保留，已有图片会被替换。
 
         :param section: 目标节。
         :param image_path: 图片路径，必须存在。
@@ -888,8 +888,10 @@ class WordFormatter:
         paragraph = part.paragraphs[0] if part.paragraphs else part.add_paragraph()
         for extra in part.paragraphs[1:]:
             extra._element.getparent().remove(extra._element)
+        # 只替换已有图片，保留同一段落中的文字，支持图片和文字共存。
         for run in list(paragraph.runs):
-            run._r.getparent().remove(run._r)
+            if run._r.xpath(".//w:drawing"):
+                run._r.getparent().remove(run._r)
         paragraph.alignment = WordFormatter.resolve_alignment(alignment, strict=True)
         paragraph.paragraph_format.line_spacing = 1
         paragraph.paragraph_format.space_before = Pt(0)
@@ -905,11 +907,13 @@ class WordFormatter:
 
     @staticmethod
     def _fill_header_footer_part(part, text, alignment, font_name, font_size):
-        """页眉/页脚共用填充实现。"""
+        """页眉/页脚共用填充实现，保留已有图片。"""
         part.is_linked_to_previous = False
         paragraph = part.paragraphs[0] if part.paragraphs else part.add_paragraph()
+        # 只替换文字，保留已有图片 run，支持图片和文字共存。
         for run in list(paragraph.runs):
-            run._r.getparent().remove(run._r)
+            if not run._r.xpath(".//w:drawing"):
+                run._r.getparent().remove(run._r)
         paragraph.alignment = WordFormatter.resolve_alignment(alignment, strict=True)
         paragraph.paragraph_format.line_spacing = 1
         paragraph.paragraph_format.space_before = Pt(0)

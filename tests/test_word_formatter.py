@@ -181,7 +181,7 @@ def test_fengmian_jiesuan_creates_cover(tmp_path):
     assert len(table.rows) == 2
     assert "测试工程" in "".join(paragraph.text for paragraph in doc.paragraphs)
     assert table.cell(0, 2).text == "测试委托单位"
-    assert table.cell(1, 2).text == "北京北咨工程咨询有限公司"
+    assert table.cell(1, 2).text == "默认编制单位"
 
 
 def test_qianfaye_creates_section_and_personnel_table(tmp_path):

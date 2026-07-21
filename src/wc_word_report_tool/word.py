@@ -9,7 +9,7 @@
 3. **默认合理**：默认值贴近中国公文标准（仿宋_GB2312、三号 14pt、1.5 倍行距）。
 4. **严格校验**：未知参数抛 ValueError 而非静默降级，便于调试。
 
-版本：v0.4.16
+版本：v0.4.17
 作者：willcha
 """
 
@@ -692,16 +692,17 @@ class WordFormatter:
     # 3.1 结算报告封面与签发页
     # ================================================================
 
-    def fengmian_jiesuan(self, logo, project_name: str, entrusting_unit: str, *,
-                         compiling_unit: str = "北京北咨工程咨询有限公司",
+    def fengmian_jiesuan(self, logo, project_name: str = "默认工程名称",
+                         entrusting_unit: str = "默认委托单位", *,
+                         compiling_unit: str = "默认编制单位",
                          report_title: str = "结算审核报告", date=None,
                          logo_width: float = 4, info_blank_lines: int = 11):
         """增加结算审核报告封面。
 
         :param logo: 封面 Logo 图片路径。
-        :param project_name: 工程名称。
-        :param entrusting_unit: 委托单位名称。
-        :param compiling_unit: 编制单位名称。
+        :param project_name: 工程名称，默认 ``"默认工程名称"``。
+        :param entrusting_unit: 委托单位名称，默认 ``"默认委托单位"``。
+        :param compiling_unit: 编制单位名称，默认 ``"默认编制单位"``。
         :param report_title: 报告标题，默认“结算审核报告”。
         :param date: 封面日期；不传时使用当天，支持 date/datetime 或标准日期字符串。
         :param logo_width: Logo 宽度，单位 cm。
@@ -735,9 +736,10 @@ class WordFormatter:
         )
         return table
 
-    def qianfaye(self, logo, project_name: str, entrusting_unit: str,
-                 personnel: dict, *, participants=None,
-                 compiling_unit: str = "北京北咨工程咨询有限公司",
+    def qianfaye(self, logo, project_name: str = "默认工程名称",
+                 entrusting_unit: str = "默认委托单位",
+                 personnel: dict | None = None, *, participants=None,
+                 compiling_unit: str = "默认编制单位",
                  report_title: str = "结算审核报告",
                  footer_text: str = "公司从业方针：客观、公正、严谨、专业",
                  logo_width: float = 2):
@@ -747,16 +749,17 @@ class WordFormatter:
         每项可填写“姓名、部门、职务、职称”，项目负责人还可填写“联系电话”。
 
         :param logo: 页眉 Logo 图片路径。
-        :param project_name: 工程名称。
-        :param entrusting_unit: 委托单位名称。
-        :param personnel: 各签发岗位的人员信息字典。
+        :param project_name: 工程名称，默认 ``"默认工程名称"``。
+        :param entrusting_unit: 委托单位名称，默认 ``"默认委托单位"``。
+        :param personnel: 各签发岗位的人员信息字典，默认空字典。
         :param participants: 项目参与者列表，每项可填写“姓名、职称”。
-        :param compiling_unit: 报告编制单位。
+        :param compiling_unit: 报告编制单位，默认 ``"默认编制单位"``。
         :param report_title: 页眉中的报告标题。
         :param footer_text: 页脚文字。
         :param logo_width: 页眉 Logo 宽度，单位 cm。
         :return: 签发页表格。
         """
+        personnel = personnel or {}
         participants = participants or []
         section = self.insert_section(
             add_page_number=False, inherit_header=False, inherit_footer=False,

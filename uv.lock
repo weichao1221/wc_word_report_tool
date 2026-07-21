@@ -160,7 +160,7 @@ wheels = [
 
 [[package]]
 name = "wc-word-report-tool"
-version = "0.1.2"
+version = "0.4.17"
 source = { editable = "." }
 dependencies = [
     { name = "python-docx" },

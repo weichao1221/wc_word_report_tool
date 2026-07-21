@@ -1,4 +1,5 @@
 """测试 wc_word_report_tool 的新 API 与向后兼容性。"""
+import base64
 from pathlib import Path
 from zipfile import ZipFile
 
@@ -13,6 +14,14 @@ from wc_word_report_tool.word import FONT_SIZE_MAP, _to_pt
 def _read_zip_xml(docx_path: Path, inner_path: str) -> str:
     with ZipFile(docx_path) as zf:
         return zf.read(inner_path).decode("utf-8", errors="ignore")
+
+
+def _write_test_png(path: Path) -> Path:
+    path.write_bytes(base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk"
+        "/x8AAusB9Y9Z4k8AAAAASUVORK5CYII="
+    ))
+    return path
 
 
 # ====================================================================
@@ -158,6 +167,45 @@ def test_blank_lines_creates_n_paragraphs():
     initial = len(doc.paragraphs)
     WordFormatter.blank_lines(doc, 3)
     assert len(doc.paragraphs) == initial + 3
+
+
+def test_fengmian_jiesuan_creates_cover(tmp_path):
+    doc = Document()
+    logo = _write_test_png(tmp_path / "logo.png")
+
+    table = WordFormatter(doc).fengmian_jiesuan(
+        logo, "测试工程", "测试委托单位", date="2026-07-21",
+        info_blank_lines=1,
+    )
+
+    assert len(table.rows) == 2
+    assert "测试工程" in "".join(paragraph.text for paragraph in doc.paragraphs)
+    assert table.cell(0, 2).text == "测试委托单位"
+    assert table.cell(1, 2).text == "北京北咨工程咨询有限公司"
+
+
+def test_qianfaye_creates_section_and_personnel_table(tmp_path):
+    doc = Document()
+    logo = _write_test_png(tmp_path / "logo.png")
+    personnel = {
+        "公司签发": {"姓名": "张三", "职务": "总经理", "职称": "正高级工程师"},
+        "项目负责人": {
+            "姓名": "李四", "部门": "造价部", "职务": "项目经理",
+            "职称": "高级工程师", "联系电话": "13800000000",
+        },
+    }
+
+    table = WordFormatter(doc).qianfaye(
+        logo, "测试工程", "测试委托单位", personnel,
+        participants=[{"姓名": "王五", "职称": "工程师"}],
+    )
+
+    assert len(doc.sections) == 2
+    assert len(table.rows) == 11
+    assert table.cell(3, 1).text == "张三"
+    assert table.cell(9, 2).text == "联系电话：13800000000"
+    assert table.cell(10, 0).text == "项目参与者："
+    assert table.cell(10, 1).text == "王五"
 
 
 def test_right_text_is_right_aligned():

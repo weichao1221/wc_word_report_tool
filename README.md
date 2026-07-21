@@ -5,7 +5,7 @@
 1. **数字转中文大写**：`number_to_chinese_upper()` 把数字转成人民币金额大写。
 2. **Word 格式化**：`WordFormatter` 提供从封面、正文、表格、页眉页脚到目录、页码的完整覆盖，默认值贴近中国公文标准。
 
-> 版本：v0.4.13
+> 版本：v0.4.16
 > 作者：willcha
 > 许可证：MIT
 > Python：>=3.9
@@ -128,6 +128,39 @@ doc.save("demo.docx")
 | `chinese_date(doc, value, *, font_name, font_size, bold, alignment)` | 中文完整日期，默认居中 |
 | `chinese_year_month(doc, value, *, font_name, font_size, bold, alignment)` | 中文年月，默认居中 |
 | `insert_img(doc, img_path, width, *, alignment)` | 插入图片（width 单位 cm） |
+
+### 结算封面与签发页
+
+```python
+formatter = WordFormatter(doc)
+
+formatter.fengmian_jiesuan(
+    logo="logo.png",
+    project_name="某工程",
+    entrusting_unit="某委托单位",
+    date="2026-07-21",  # 可省略，默认当天
+)
+
+formatter.qianfaye(
+    logo="logo.png",
+    project_name="某工程",
+    entrusting_unit="某委托单位",
+    personnel={
+        "公司签发": {"姓名": "张三", "职务": "总经理", "职称": "正高级工程师"},
+        "部门核准": {"姓名": "李四", "部门": "造价部", "职务": "经理", "职称": "高级工程师"},
+        "部门审核": {"姓名": "王五", "部门": "造价部", "职务": "副经理", "职称": "高级工程师"},
+        "小组初审": {"姓名": "赵六", "部门": "造价部", "职务": "组长", "职称": "工程师"},
+        "项目负责人": {
+            "姓名": "钱七", "部门": "造价部", "职务": "项目经理",
+            "职称": "高级工程师", "联系电话": "13800000000",
+        },
+    },
+    participants=[{"姓名": "孙八", "职称": "工程师"}],
+)
+```
+
+`compiling_unit`、`report_title`、`logo_width` 可按项目覆盖；封面还可传
+`info_blank_lines`，签发页还可传 `footer_text`。
 
 ### 表格
 

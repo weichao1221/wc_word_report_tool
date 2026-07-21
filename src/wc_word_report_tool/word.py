@@ -9,7 +9,7 @@
 3. **默认合理**：默认值贴近中国公文标准（仿宋_GB2312、三号 14pt、1.5 倍行距）。
 4. **严格校验**：未知参数抛 ValueError 而非静默降级，便于调试。
 
-版本：v0.4.13
+版本：v0.4.16
 作者：willcha
 """
 
@@ -20,7 +20,7 @@ from pathlib import Path
 
 from docx.enum.style import WD_STYLE_TYPE
 from docx.enum.section import WD_SECTION_START
-from docx.enum.table import WD_TABLE_ALIGNMENT
+from docx.enum.table import WD_ROW_HEIGHT_RULE, WD_TABLE_ALIGNMENT
 from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_COLOR_INDEX, WD_PARAGRAPH_ALIGNMENT
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
@@ -689,6 +689,134 @@ class WordFormatter:
         return par
 
     # ================================================================
+    # 3.1 结算报告封面与签发页
+    # ================================================================
+
+    def fengmian_jiesuan(self, logo, project_name: str, entrusting_unit: str, *,
+                         compiling_unit: str = "北京北咨工程咨询有限公司",
+                         report_title: str = "结算审核报告", date=None,
+                         logo_width: float = 4, info_blank_lines: int = 11):
+        """增加结算审核报告封面。
+
+        :param logo: 封面 Logo 图片路径。
+        :param project_name: 工程名称。
+        :param entrusting_unit: 委托单位名称。
+        :param compiling_unit: 编制单位名称。
+        :param report_title: 报告标题，默认“结算审核报告”。
+        :param date: 封面日期；不传时使用当天，支持 date/datetime 或标准日期字符串。
+        :param logo_width: Logo 宽度，单位 cm。
+        :param info_blank_lines: 报告标题与落款表格之间的空行数。
+        :return: 封面落款表格。
+        """
+        self.insert_img(str(logo), logo_width)
+        self.blank_lines(1)
+        self.body(
+            project_name, font_name="黑体", font_size=20,
+            alignment="居中", indent=False,
+        )
+        self.body(
+            report_title, font_name="宋体", font_size=24,
+            alignment="居中", bold=True, indent=False,
+        )
+        self.blank_lines(info_blank_lines)
+
+        table = self.doc.add_table(rows=2, cols=3)
+        self.edit_cell(table, "委托单位：", 0, 1, bold=True)
+        self.edit_cell(table, entrusting_unit, 0, 2, bold=True)
+        self.edit_cell(table, "编制单位：", 1, 1, bold=True)
+        self.edit_cell(table, compiling_unit, 1, 2, bold=True)
+        for row in table.rows:
+            row.cells[0].width = Cm(1.5)
+            row.cells[1].width = Cm(4)
+            row.cells[2].width = Cm(10)
+
+        self.chinese_year_month(
+            date, font_size="三号", font_name="宋体", bold=True,
+        )
+        return table
+
+    def qianfaye(self, logo, project_name: str, entrusting_unit: str,
+                 personnel: dict, *, participants=None,
+                 compiling_unit: str = "北京北咨工程咨询有限公司",
+                 report_title: str = "结算审核报告",
+                 footer_text: str = "公司从业方针：客观、公正、严谨、专业",
+                 logo_width: float = 2):
+        """新建一节并增加结算审核报告签发页。
+
+        ``personnel`` 可包含“公司签发、部门核准、部门审核、小组初审、项目负责人”；
+        每项可填写“姓名、部门、职务、职称”，项目负责人还可填写“联系电话”。
+
+        :param logo: 页眉 Logo 图片路径。
+        :param project_name: 工程名称。
+        :param entrusting_unit: 委托单位名称。
+        :param personnel: 各签发岗位的人员信息字典。
+        :param participants: 项目参与者列表，每项可填写“姓名、职称”。
+        :param compiling_unit: 报告编制单位。
+        :param report_title: 页眉中的报告标题。
+        :param footer_text: 页脚文字。
+        :param logo_width: 页眉 Logo 宽度，单位 cm。
+        :return: 签发页表格。
+        """
+        participants = participants or []
+        section = self.insert_section(
+            add_page_number=False, inherit_header=False, inherit_footer=False,
+        )
+        self.set_header_image(
+            section, logo, width=logo_width, alignment="居左", y_offset_pt=0,
+        )
+        self.set_header(
+            section, f"{project_name}{report_title}", font_name="宋体",
+            font_size="小五", bottom_border=True,
+        )
+        self.set_footer(
+            section, footer_text, font_name="楷体_GB2312", font_size="小五",
+            alignment="居左", line_length=6,
+        )
+
+        table = self.doc.add_table(rows=10 + len(participants), cols=4)
+        table.cell(0, 0).merge(table.cell(0, 3))
+        self.edit_cell(table, f"委托单位：{entrusting_unit}", 0, 0, bold=True)
+        table.cell(1, 0).merge(table.cell(1, 3))
+        self.edit_cell(table, f"报告编制单位：{compiling_unit}", 1, 0, bold=True)
+
+        roles = (
+            ("公司签发", 3), ("部门核准", 4), ("部门审核", 5),
+            ("小组初审", 6), ("项目负责人", 7),
+        )
+        for role, row_index in roles:
+            data = personnel.get(role, {})
+            department_and_position = [data.get("部门", ""), data.get("职务", "")]
+            if role == "公司签发":
+                department_and_position[0] = ""
+            self.edit_cell(table, f"{role}：", row_index, 0)
+            self.edit_cell(table, data.get("姓名", ""), row_index, 1)
+            self.edit_cell(table, department_and_position, row_index, 2)
+            self.edit_cell(table, data.get("职称", ""), row_index, 3)
+
+        self.edit_cell(table, "签字：", 8, 0)
+        self.edit_cell(table, "盖章", 8, 2)
+        table.rows[8].height = Cm(1.5)
+        table.rows[8].height_rule = WD_ROW_HEIGHT_RULE.AT_LEAST
+
+        table.cell(9, 2).merge(table.cell(9, 3))
+        project_manager = personnel.get("项目负责人", {})
+        self.edit_cell(
+            table, f"联系电话：{project_manager.get('联系电话', '')}", 9, 2,
+        )
+
+        for index, data in enumerate(participants, start=10):
+            if index == 10:
+                self.edit_cell(table, "项目参与者：", index, 0)
+            self.edit_cell(table, data.get("姓名", ""), index, 1)
+            self.edit_cell(table, data.get("职称", ""), index, 3)
+
+        table.alignment = WD_TABLE_ALIGNMENT.CENTER
+        for row in table.rows:
+            row.cells[0].width = Cm(4)
+            row.cells[3].width = Cm(5)
+        return table
+
+    # ================================================================
     # 4. 表格（新增能力）
     # ================================================================
 
@@ -834,7 +962,8 @@ class WordFormatter:
     def set_footer(section, text: str, *, alignment="居中",
                    font_name: str = DEFAULT_HEADER_FOOTER_FONT,
                    font_size=DEFAULT_HEADER_FOOTER_SIZE,
-                   bottom_border: bool = True, line_length=None,
+                   bottom_border: bool = False, top_border: bool = True,
+                   line_length=None,
                    line_alignment="居左"):
         """设置指定节的页脚文本（默认楷体小五号）。
 
@@ -849,6 +978,7 @@ class WordFormatter:
             section.footer, text, alignment, font_name, font_size,
             bottom_border=bottom_border, section=section,
             line_length=line_length, line_alignment=line_alignment,
+            top_border=top_border, separate_page_number=True,
         )
 
     @staticmethod
@@ -938,13 +1068,19 @@ class WordFormatter:
     @staticmethod
     def _fill_header_footer_part(part, text, alignment, font_name, font_size,
                                  *, bottom_border=False, section=None,
-                                 line_length=None, line_alignment="居左"):
-        """页眉/页脚共用填充实现，保留已有图片。"""
+                                 line_length=None, line_alignment="居左",
+                                 top_border=False, separate_page_number=False):
+        """页眉/页脚共用填充实现，保留已有图片和页码域。"""
         part.is_linked_to_previous = False
         paragraph = part.paragraphs[0] if part.paragraphs else part.add_paragraph()
-        # 只替换文字，保留已有图片 run，支持图片和文字共存。
+        if separate_page_number and any(WordFormatter._is_field_run(run) for run in paragraph.runs):
+            new_paragraph = part.add_paragraph("")
+            part._element.remove(new_paragraph._p)
+            part._element.insert(list(part._element).index(paragraph._p), new_paragraph._p)
+            paragraph = new_paragraph
+        # 只替换普通文字，保留图片和 PAGE 域，支持文字、图片、页码共存。
         for run in list(paragraph.runs):
-            if not run._r.xpath(".//w:drawing"):
+            if not run._r.xpath(".//w:drawing") and not WordFormatter._is_field_run(run):
                 run._r.getparent().remove(run._r)
         paragraph.alignment = WordFormatter.resolve_alignment(alignment, strict=True)
         paragraph.paragraph_format.line_spacing = 1
@@ -956,12 +1092,61 @@ class WordFormatter:
                 run, cn_font=font_name, en_font=DEFAULT_EN_FONT,
                 size=font_size, bold=False, color=(0, 0, 0),
             )
+            # 页码已经存在时，把新文字放到 PAGE 域之前。
+            field_run = next(
+                (item for item in paragraph.runs if WordFormatter._is_field_run(item)),
+                None,
+            )
+            if field_run is not None:
+                paragraph._p.remove(run._r)
+                field_index = list(paragraph._p).index(field_run._r)
+                paragraph._p.insert(field_index, run._r)
         if bottom_border:
             WordFormatter._set_bottom_border(
                 paragraph, section=section, line_length=line_length,
                 line_alignment=line_alignment,
             )
+        if top_border:
+            WordFormatter._set_top_border(
+                paragraph, section=section, line_length=line_length,
+                line_alignment=line_alignment,
+            )
         return part
+
+    @staticmethod
+    def _set_top_border(paragraph, *, section=None, line_length=None,
+                        line_alignment="居左"):
+        """给页眉/页脚段落增加顶部横线。"""
+        p_pr = paragraph._p.get_or_add_pPr()
+        p_bdr = p_pr.find(qn("w:pBdr"))
+        if p_bdr is None:
+            p_bdr = OxmlElement("w:pBdr")
+            p_pr.append(p_bdr)
+        top = p_bdr.find(qn("w:top"))
+        if top is None:
+            top = OxmlElement("w:top")
+            p_bdr.append(top)
+        top.set(qn("w:val"), "single")
+        top.set(qn("w:sz"), "6")
+        top.set(qn("w:space"), "1")
+        top.set(qn("w:color"), "auto")
+        if section is not None:
+            available = section.page_width.cm - section.left_margin.cm - section.right_margin.cm
+            length = available if line_length is None else max(0, min(float(line_length), available))
+            remaining = available - length
+            if line_alignment in ("居右", "右对齐", "right", "R"):
+                paragraph.paragraph_format.left_indent = Cm(remaining)
+                paragraph.paragraph_format.right_indent = Cm(0)
+            elif line_alignment in ("居中", "居中对齐", "center", "C"):
+                paragraph.paragraph_format.left_indent = Cm(remaining / 2)
+                paragraph.paragraph_format.right_indent = Cm(remaining / 2)
+            else:
+                paragraph.paragraph_format.left_indent = Cm(0)
+                paragraph.paragraph_format.right_indent = Cm(remaining)
+
+    @staticmethod
+    def _is_field_run(run):
+        return bool(run._r.xpath(".//w:fldChar | .//w:instrText"))
 
     @staticmethod
     def _set_bottom_border(paragraph, *, section=None, line_length=None,
@@ -1081,6 +1266,8 @@ class WordFormatter:
                        start_page_number: int = 1,
                        inherit_header: bool = True,
                        inherit_footer: bool = True,
+                       show_total_pages: bool = False,
+                       total_pages_separator: str = " / ",
                        prefix: str = "", suffix: str = "",
                        alignment="居中", font_name: str | None = None,
                        font_size=None):
@@ -1122,6 +1309,8 @@ class WordFormatter:
                     section, start=start_page_number, add_footer_number=True,
                     prefix=prefix, suffix=suffix, alignment=alignment,
                     font_name=font_name, font_size=font_size,
+                    show_total_pages=show_total_pages,
+                    total_pages_separator=total_pages_separator,
                 )
             elif inherit_footer:
                 section.footer.is_linked_to_previous = True
@@ -1130,6 +1319,8 @@ class WordFormatter:
                 self.add_footer_page_number(
                     section, prefix=prefix, suffix=suffix, alignment=alignment,
                     font_name=font_name, font_size=font_size,
+                    show_total_pages=show_total_pages,
+                    total_pages_separator=total_pages_separator,
                 )
         elif inherit_footer:
             section.footer.is_linked_to_previous = True
@@ -1155,7 +1346,8 @@ class WordFormatter:
     @staticmethod
     def add_page_number(paragraph, *, prefix: str = "", suffix: str = "",
                        alignment="居中", font_name: str | None = None,
-                       font_size=None):
+                       font_size=None, show_total_pages: bool = False,
+                       total_pages_separator: str = " / "):
         """向段落添加页码域（PAGE field）。
 
         :param paragraph: 目标段落，通常是页脚段落。
@@ -1178,12 +1370,19 @@ class WordFormatter:
         if suffix:
             suffix_run = paragraph.add_run(suffix)
             WordFormatter.set_run_font(suffix_run, cn_font=cn_font, size=size)
+        if show_total_pages:
+            separator_run = paragraph.add_run(total_pages_separator)
+            WordFormatter.set_run_font(separator_run, cn_font=cn_font, size=size)
+            total_runs = WordFormatter._append_field_run(paragraph, "NUMPAGES")
+            for run in total_runs:
+                WordFormatter.set_run_font(run, cn_font=cn_font, size=size)
         return paragraph
 
     @staticmethod
     def add_footer_page_number(section, *, prefix: str = "", suffix: str = "",
                                 alignment="居中", font_name: str | None = None,
-                                font_size=None):
+                                font_size=None, show_total_pages: bool = False,
+                                total_pages_separator: str = " / "):
         """向指定节页脚添加页码，并复用现有首段。
 
         :param section: 目标节。
@@ -1198,20 +1397,26 @@ class WordFormatter:
         paragraph = footer.paragraphs[0] if footer.paragraphs else footer.add_paragraph()
         for extra in footer.paragraphs[1:]:
             extra._element.getparent().remove(extra._element)
+        # 保留已有 PAGE 域，避免重新设置页脚文字时页码消失。
         for run in list(paragraph.runs):
-            run._r.getparent().remove(run._r)
+            if not WordFormatter._is_field_run(run):
+                run._r.getparent().remove(run._r)
         paragraph.paragraph_format.line_spacing = 1
         paragraph.paragraph_format.space_before = Pt(0)
         paragraph.paragraph_format.space_after = Pt(0)
         return WordFormatter.add_page_number(
             paragraph, prefix=prefix, suffix=suffix, alignment=alignment,
             font_name=font_name, font_size=font_size,
+            show_total_pages=show_total_pages,
+            total_pages_separator=total_pages_separator,
         )
 
     @staticmethod
     def restart_page_numbering(section, *, start: int = 1, add_footer_number: bool = True,
                                prefix: str = "", suffix: str = "", alignment="居中",
-                               font_name: str | None = None, font_size=None):
+                               font_name: str | None = None, font_size=None,
+                               show_total_pages: bool = False,
+                               total_pages_separator: str = " / "):
         """重启指定节的页码编号。
 
         :param section: 目标节。
@@ -1230,6 +1435,8 @@ class WordFormatter:
             WordFormatter.add_footer_page_number(
                 section, prefix=prefix, suffix=suffix, alignment=alignment,
                 font_name=font_name, font_size=font_size,
+                show_total_pages=show_total_pages,
+                total_pages_separator=total_pages_separator,
             )
         return section
 

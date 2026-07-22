@@ -9,7 +9,7 @@
 3. **默认合理**：默认值贴近中国公文标准（仿宋_GB2312、三号 14pt、1.5 倍行距）。
 4. **严格校验**：未知参数抛 ValueError 而非静默降级，便于调试。
 
-版本：v0.4.17
+版本：v0.4.19
 作者：willcha
 """
 
@@ -22,7 +22,7 @@ from docx.enum.style import WD_STYLE_TYPE
 from docx.enum.section import WD_SECTION_START
 from docx.enum.table import WD_ROW_HEIGHT_RULE, WD_TABLE_ALIGNMENT
 from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_COLOR_INDEX, WD_PARAGRAPH_ALIGNMENT
-from docx.oxml import OxmlElement
+from docx.oxml import OxmlElement, parse_xml
 from docx.oxml.ns import qn
 from docx.shared import Cm, Pt, RGBColor
 
@@ -742,7 +742,8 @@ class WordFormatter:
                  compiling_unit: str = "默认编制单位",
                  report_title: str = "结算审核报告",
                  footer_text: str = "公司从业方针：客观、公正、严谨、专业",
-                 logo_width: float = 2):
+                 logo_width: float = 2,
+                 logo_y_offset_pt: float = 0):
         """新建一节并增加结算审核报告签发页。
 
         ``personnel`` 可包含“公司签发、部门核准、部门审核、小组初审、项目负责人”；
@@ -757,6 +758,7 @@ class WordFormatter:
         :param report_title: 页眉中的报告标题。
         :param footer_text: 页脚文字。
         :param logo_width: 页眉 Logo 宽度，单位 cm。
+        :param logo_y_offset_pt: 页眉 Logo 垂直偏移，单位 pt；正数上移，负数下移。
         :return: 签发页表格。
         """
         personnel = personnel or {}
@@ -765,7 +767,8 @@ class WordFormatter:
             add_page_number=False, inherit_header=False, inherit_footer=False,
         )
         self.set_header_image(
-            section, logo, width=logo_width, alignment="居左", y_offset_pt=0,
+            section, logo, width=logo_width, alignment="居左",
+            y_offset_pt=logo_y_offset_pt,
         )
         self.set_header(
             section, f"{project_name}{report_title}", font_name="宋体",
@@ -1046,7 +1049,7 @@ class WordFormatter:
             extra._element.getparent().remove(extra._element)
         # 只替换已有图片，保留同一段落中的文字，支持图片和文字共存。
         for run in list(paragraph.runs):
-            if run._r.xpath(".//w:drawing"):
+            if run._r.xpath(".//w:drawing") or run._r.xpath(".//w:pict"):
                 run._r.getparent().remove(run._r)
         paragraph.alignment = WordFormatter.resolve_alignment(alignment, strict=True)
         paragraph.paragraph_format.line_spacing = 1
@@ -1083,7 +1086,11 @@ class WordFormatter:
             paragraph = new_paragraph
         # 只替换普通文字，保留图片和 PAGE 域，支持文字、图片、页码共存。
         for run in list(paragraph.runs):
-            if not run._r.xpath(".//w:drawing") and not WordFormatter._is_field_run(run):
+            if (
+                not run._r.xpath(".//w:drawing")
+                and not run._r.xpath(".//w:pict")
+                and not WordFormatter._is_field_run(run)
+            ):
                 run._r.getparent().remove(run._r)
         paragraph.alignment = WordFormatter.resolve_alignment(alignment, strict=True)
         paragraph.paragraph_format.line_spacing = 1
@@ -1187,68 +1194,52 @@ class WordFormatter:
 
     @staticmethod
     def _make_run_floating(run, *, y_offset_pt: float = 0):
-        """将图片 run 从行内对象转换为浮动对象，允许文字覆盖在图片旁边。"""
+        """将图片 run 转为 Word 兼容的 VML 浮动对象。"""
         inline = run._r.xpath(".//wp:inline")
         if not inline:
             return
         inline = inline[0]
         extent = inline.find(qn("wp:extent"))
+        if extent is None:
+            return
+        drawing = inline.getparent()
+        blip = inline.xpath(".//a:blip")
+        if drawing is None or not blip:
+            return
+        image_rel_id = blip[0].get(qn("r:embed"))
+        if not image_rel_id:
+            return
+
+        # Word for Mac 会拒绝本模块此前手工拼接的 wp:anchor。VML 同样是
+        # Word 支持的绝对定位图片格式，且在页眉、页脚中兼容性更好。
+        image_width = int(extent.get("cx", "0")) / 12700
         image_height = int(extent.get("cy", "0")) if extent is not None else 0
-        anchor = OxmlElement("wp:anchor")
-        for name, value in {
-            "distT": "0", "distB": "0", "distL": "0", "distR": "0",
-            "simplePos": "0", "relativeHeight": "251658240",
-            "behindDoc": "0", "locked": "0", "layoutInCell": "1",
-            "allowOverlap": "1",
-        }.items():
-            anchor.set(qn(f"wp:{name}"), value)
+        image_height_pt = image_height / 12700
+        top_offset = -(image_height_pt / 2) - float(y_offset_pt)
 
-        simple_pos = OxmlElement("wp:simplePos")
-        simple_pos.set("x", "0")
-        simple_pos.set("y", "0")
-        anchor.append(simple_pos)
-
-        for tag in ("positionH", "positionV"):
-            position = OxmlElement(f"wp:{tag}")
-            position.set(
-                "relativeFrom",
-                "column" if tag == "positionH" else "line",
-            )
-            offset = OxmlElement("wp:posOffset")
-            # 以文字行的中线作为图片中心，避免图片默认偏低。
-            if tag == "positionH":
-                offset.text = "0"
-            else:
-                # Word 坐标单位为 EMU；正数 y_offset_pt 表示向上。
-                offset_emu = -(image_height // 2) - round(float(y_offset_pt) * 12700)
-                offset.text = str(offset_emu)
-            position.append(offset)
-            anchor.append(position)
-
-        for child in list(inline):
-            anchor.append(child)
-        effect_extent = OxmlElement("wp:effectExtent")
-        for name in ("l", "t", "r", "b"):
-            effect_extent.set(name, "0")
-        anchor.insert(4, effect_extent)
-        wrap_none = OxmlElement("wp:wrapNone")
-        anchor.insert(5, wrap_none)
-
-        # 当前图片默认 ID 往往为 1；Word 要求整份文档内唯一。
-        used_ids = set()
-        for part in run.part.package.parts:
-            element = getattr(part, "_element", None)
-            if element is None:
-                continue
-            for doc_pr in element.xpath(".//wp:docPr"):
-                value = doc_pr.get("id")
-                if value and value.isdigit():
-                    used_ids.add(int(value))
-
-        doc_pr = anchor.find(qn("wp:docPr"))
-        if doc_pr is not None:
-            doc_pr.set("id", str(max(used_ids, default=0) + 1))
-        inline.getparent().replace(inline, anchor)
+        # python-docx 默认没有注册 VML 的 v/o 前缀，因此此处完整声明命名空间。
+        pict = parse_xml(
+            '<w:pict xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" '
+            'xmlns:v="urn:schemas-microsoft-com:vml" '
+            'xmlns:o="urn:schemas-microsoft-com:office:office" '
+            'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
+            f'<v:shape id="FloatingPicture{run.part.next_id}" type="#_x0000_t75" '
+            'style="position:absolute;'
+            'margin-left:-5pt;'
+            f'margin-top:{top_offset:.2f}pt;'
+            f'width:{image_width:.2f}pt;'
+            f'height:{image_height_pt:.2f}pt;'
+            'z-index:251658240;'
+            'mso-wrap-style:none;'
+            'mso-position-horizontal:left;'
+            'mso-position-horizontal-relative:margin;'
+            'mso-position-vertical-relative:line" '
+            'o:allowincell="f">'
+            f'<v:imagedata r:id="{image_rel_id}" o:title=""/>'
+            '</v:shape>'
+            '</w:pict>'
+        )
+        drawing.getparent().replace(drawing, pict)
 
     @staticmethod
     def clear_footer(section):

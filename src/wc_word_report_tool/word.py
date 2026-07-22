@@ -1233,6 +1233,21 @@ class WordFormatter:
         anchor.insert(4, effect_extent)
         wrap_none = OxmlElement("wp:wrapNone")
         anchor.insert(5, wrap_none)
+
+        # 当前图片默认 ID 往往为 1；Word 要求整份文档内唯一。
+        used_ids = set()
+        for part in run.part.package.parts:
+            element = getattr(part, "_element", None)
+            if element is None:
+                continue
+            for doc_pr in element.xpath(".//wp:docPr"):
+                value = doc_pr.get("id")
+                if value and value.isdigit():
+                    used_ids.add(int(value))
+
+        doc_pr = anchor.find(qn("wp:docPr"))
+        if doc_pr is not None:
+            doc_pr.set("id", str(max(used_ids, default=0) + 1))
         inline.getparent().replace(inline, anchor)
 
     @staticmethod

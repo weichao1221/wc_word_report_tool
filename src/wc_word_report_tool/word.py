@@ -9,7 +9,7 @@
 3. **默认合理**：默认值贴近中国公文标准（仿宋_GB2312、三号 14pt、1.5 倍行距）。
 4. **严格校验**：未知参数抛 ValueError 而非静默降级，便于调试。
 
-版本：v0.4.17
+版本：v0.4.20
 作者：willcha
 """
 
@@ -22,7 +22,7 @@ from docx.enum.style import WD_STYLE_TYPE
 from docx.enum.section import WD_SECTION_START
 from docx.enum.table import WD_ROW_HEIGHT_RULE, WD_TABLE_ALIGNMENT
 from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_COLOR_INDEX, WD_PARAGRAPH_ALIGNMENT
-from docx.oxml import OxmlElement
+from docx.oxml import OxmlElement, parse_xml
 from docx.oxml.ns import qn
 from docx.shared import Cm, Pt, RGBColor
 
@@ -176,7 +176,9 @@ class WordFormatter:
     @staticmethod
     def set_paragraph_format(paragraph, *, alignment=None, line_spacing=1.5,
                               space_before=0, space_after=0,
-                              first_line_indent_pt=None, strict: bool = False):
+                              first_line_indent_pt=None,
+                              first_line_indent_chars=None,
+                              strict: bool = False):
         """设置段落基础格式。
 
         :param alignment: 对齐方式，支持中文、英文、单字母、数字和对齐枚举。
@@ -184,7 +186,9 @@ class WordFormatter:
         :param line_spacing: 行距倍数。
         :param space_before: 段前空白，单位 pt。
         :param space_after: 段后空白，单位 pt。
-        :param first_line_indent_pt: 首行缩进，单位 pt；None 表示不设置。
+        :param first_line_indent_pt: 首行缩进兜底值，单位 pt；None 表示不设置。
+        :param first_line_indent_chars: 首行缩进字符数；写入 ``w:firstLineChars``，
+                                        优先级高于 ``w:firstLine``。
         :param strict: 是否对未知对齐方式抛出 ValueError，默认否。
         """
         if alignment is not None:
@@ -192,9 +196,44 @@ class WordFormatter:
         paragraph.paragraph_format.line_spacing = line_spacing
         paragraph.paragraph_format.space_before = Pt(space_before)
         paragraph.paragraph_format.space_after = Pt(space_after)
-        if first_line_indent_pt is not None:
-            paragraph.paragraph_format.first_line_indent = Pt(first_line_indent_pt)
+        WordFormatter._set_first_line_indent(
+            paragraph,
+            first_line_indent_pt=first_line_indent_pt,
+            first_line_indent_chars=first_line_indent_chars,
+        )
         return paragraph
+
+    @staticmethod
+    def _set_first_line_indent(target, *, first_line_indent_pt=None,
+                               first_line_indent_chars=None):
+        """设置首行缩进，字符单位优先，pt 值作为兼容兜底。"""
+        if first_line_indent_pt is None and first_line_indent_chars is None:
+            return target
+
+        if first_line_indent_pt is not None:
+            target.paragraph_format.first_line_indent = Pt(first_line_indent_pt)
+
+        p_pr = target._p.get_or_add_pPr() if hasattr(target, "_p") \
+            else target.element.get_or_add_pPr()
+        ind = p_pr.get_or_add_ind()
+        if first_line_indent_chars is None:
+            # 旧接口只传 pt 时恢复绝对缩进语义，避免历史字符值继续抢占优先级。
+            ind.attrib.pop(qn("w:firstLineChars"), None)
+            return target
+
+        try:
+            chars_value = float(first_line_indent_chars)
+        except (TypeError, ValueError) as exc:
+            raise TypeError("first_line_indent_chars 必须是数字") from exc
+        if chars_value < 0:
+            raise ValueError("first_line_indent_chars 不能小于 0")
+
+        raw_value = round(chars_value * 100)
+        # 首行缩进与悬挂缩进互斥，避免模板中的旧属性干扰字符缩进。
+        ind.attrib.pop(qn("w:hanging"), None)
+        ind.attrib.pop(qn("w:hangingChars"), None)
+        ind.set(qn("w:firstLineChars"), str(raw_value))
+        return target
 
 
     @staticmethod
@@ -307,6 +346,7 @@ class WordFormatter:
         space_before = options.get("space_before")
         space_after = options.get("space_after")
         first_line_indent = options.get("first_line_indent")
+        first_line_indent_chars = options.get("first_line_indent_chars")
         left_indent = options.get("left_indent")
         alignment = options.get("alignment")
 
@@ -325,8 +365,12 @@ class WordFormatter:
             style.paragraph_format.space_before = Pt(space_before)
         if space_after is not None:
             style.paragraph_format.space_after = Pt(space_after)
-        if first_line_indent is not None:
-            style.paragraph_format.first_line_indent = Pt(first_line_indent)
+        if first_line_indent is not None or first_line_indent_chars is not None:
+            WordFormatter._set_first_line_indent(
+                style,
+                first_line_indent_pt=first_line_indent,
+                first_line_indent_chars=first_line_indent_chars,
+            )
         if left_indent is not None:
             style.paragraph_format.left_indent = Pt(left_indent)
         if alignment is not None:
@@ -335,7 +379,8 @@ class WordFormatter:
 
     def _configure_heading_style(self, level: int, *, cn_font: str, en_font: str, size, bold: bool,
                                  color: tuple[int, int, int] | None = None, line_spacing=1,
-                                 space_before=12, space_after=12, first_line_indent=28):
+                                 space_before=12, space_after=12, first_line_indent=28,
+                                 first_line_indent_chars=2):
         style = self.doc.styles[f"Heading {level}"]
         return self._apply_style_options(
             style,
@@ -349,6 +394,7 @@ class WordFormatter:
                 "space_before": space_before,
                 "space_after": space_after,
                 "first_line_indent": first_line_indent,
+                "first_line_indent_chars": first_line_indent_chars,
                 "alignment": "左对齐",
             },
         )
@@ -356,11 +402,12 @@ class WordFormatter:
     def _add_heading_with_style(self, heading_text: str, *, level: int, cn_font: str, en_font: str,
                                 size, bold: bool, color: tuple[int, int, int] | None = None,
                                 line_spacing=1, space_before=12, space_after=12,
-                                first_line_indent=28):
+                                first_line_indent=28, first_line_indent_chars=2):
         self._configure_heading_style(
             level, cn_font=cn_font, en_font=en_font, size=size, bold=bold, color=color,
             line_spacing=line_spacing, space_before=space_before, space_after=space_after,
             first_line_indent=first_line_indent,
+            first_line_indent_chars=first_line_indent_chars,
         )
         heading = self.doc.add_heading("", level=level)
         run = heading.add_run(heading_text)
@@ -467,7 +514,8 @@ class WordFormatter:
                           数字字符串，以及 ``FONT_SIZE_MAP`` 中的中文字号，
                           例如 ``"三号"``、``"四号"``、``"小五"``。
         :param indent: 是否首行缩进 2 字符，默认 ``True``。缩进值按当前字号
-                       乘以 2 换算，因此不是固定 28pt。
+                       乘以 2 生成 ``w:firstLine`` 兼容值，同时优先写入
+                       ``w:firstLineChars=\"200\"``。
         :param bold: 是否加粗，默认 ``False``。
         :param highlight: 是否使用黄色高亮，默认 ``False``。
         :param alignment: 段落对齐方式，默认 ``"两端对齐"``。支持
@@ -490,6 +538,7 @@ class WordFormatter:
             space_before=space_before,
             space_after=space_after,
             first_line_indent_pt=_to_pt(font_size) * 2 if indent else None,
+            first_line_indent_chars=2 if indent else None,
         )
         run = par.add_run(text)
         self.set_run_font(
@@ -532,7 +581,8 @@ class WordFormatter:
             size=font_size, bold=bold, line_spacing=line_spacing,
             space_before=_to_pt(font_size) * 0.5 if space_before is None else space_before,
             space_after=_to_pt(font_size) * 0.5 if space_after is None else space_after,
-            first_line_indent=_to_pt(font_size) * 2 if indent else None, color=(0, 0, 0),
+            first_line_indent=_to_pt(font_size) * 2 if indent else None,
+            first_line_indent_chars=2 if indent else None, color=(0, 0, 0),
         )
 
     def cover_text(self, text: str, *, font_name: str = "方正小标宋简体",
@@ -557,6 +607,7 @@ class WordFormatter:
             space_before=_to_pt(font_size) if space_before is None else space_before,
             space_after=_to_pt(font_size) if space_after is None else space_after,
             first_line_indent_pt=_to_pt(font_size) * 2 if indent else None,
+            first_line_indent_chars=2 if indent else None,
         )
         run = par.add_run(text)
         self.set_run_font(run, cn_font=font_name, size=font_size, bold=bold)
@@ -574,7 +625,8 @@ class WordFormatter:
         par = self.doc.add_paragraph("")
         self.set_paragraph_format(
             par, alignment=WD_PARAGRAPH_ALIGNMENT.RIGHT,
-            first_line_indent_pt=28 if indent else None,
+            first_line_indent_pt=_to_pt(font_size) * 2 if indent else None,
+            first_line_indent_chars=2 if indent else None,
         )
         run = par.add_run(text)
         self.set_run_font(run, cn_font=font_name, size=font_size)
@@ -742,7 +794,8 @@ class WordFormatter:
                  compiling_unit: str = "默认编制单位",
                  report_title: str = "结算审核报告",
                  footer_text: str = "公司从业方针：客观、公正、严谨、专业",
-                 logo_width: float = 2):
+                 logo_width: float = 2,
+                 logo_y_offset_pt: float = 0):
         """新建一节并增加结算审核报告签发页。
 
         ``personnel`` 可包含“公司签发、部门核准、部门审核、小组初审、项目负责人”；
@@ -757,6 +810,7 @@ class WordFormatter:
         :param report_title: 页眉中的报告标题。
         :param footer_text: 页脚文字。
         :param logo_width: 页眉 Logo 宽度，单位 cm。
+        :param logo_y_offset_pt: 页眉 Logo 垂直偏移，单位 pt；正数上移，负数下移。
         :return: 签发页表格。
         """
         personnel = personnel or {}
@@ -765,7 +819,8 @@ class WordFormatter:
             add_page_number=False, inherit_header=False, inherit_footer=False,
         )
         self.set_header_image(
-            section, logo, width=logo_width, alignment="居左", y_offset_pt=0,
+            section, logo, width=logo_width, alignment="居左",
+            y_offset_pt=logo_y_offset_pt,
         )
         self.set_header(
             section, f"{project_name}{report_title}", font_name="宋体",
@@ -1046,7 +1101,7 @@ class WordFormatter:
             extra._element.getparent().remove(extra._element)
         # 只替换已有图片，保留同一段落中的文字，支持图片和文字共存。
         for run in list(paragraph.runs):
-            if run._r.xpath(".//w:drawing"):
+            if run._r.xpath(".//w:drawing") or run._r.xpath(".//w:pict"):
                 run._r.getparent().remove(run._r)
         paragraph.alignment = WordFormatter.resolve_alignment(alignment, strict=True)
         paragraph.paragraph_format.line_spacing = 1
@@ -1083,7 +1138,11 @@ class WordFormatter:
             paragraph = new_paragraph
         # 只替换普通文字，保留图片和 PAGE 域，支持文字、图片、页码共存。
         for run in list(paragraph.runs):
-            if not run._r.xpath(".//w:drawing") and not WordFormatter._is_field_run(run):
+            if (
+                not run._r.xpath(".//w:drawing")
+                and not run._r.xpath(".//w:pict")
+                and not WordFormatter._is_field_run(run)
+            ):
                 run._r.getparent().remove(run._r)
         paragraph.alignment = WordFormatter.resolve_alignment(alignment, strict=True)
         paragraph.paragraph_format.line_spacing = 1
@@ -1187,53 +1246,52 @@ class WordFormatter:
 
     @staticmethod
     def _make_run_floating(run, *, y_offset_pt: float = 0):
-        """将图片 run 从行内对象转换为浮动对象，允许文字覆盖在图片旁边。"""
+        """将图片 run 转为 Word 兼容的 VML 浮动对象。"""
         inline = run._r.xpath(".//wp:inline")
         if not inline:
             return
         inline = inline[0]
         extent = inline.find(qn("wp:extent"))
+        if extent is None:
+            return
+        drawing = inline.getparent()
+        blip = inline.xpath(".//a:blip")
+        if drawing is None or not blip:
+            return
+        image_rel_id = blip[0].get(qn("r:embed"))
+        if not image_rel_id:
+            return
+
+        # Word for Mac 会拒绝本模块此前手工拼接的 wp:anchor。VML 同样是
+        # Word 支持的绝对定位图片格式，且在页眉、页脚中兼容性更好。
+        image_width = int(extent.get("cx", "0")) / 12700
         image_height = int(extent.get("cy", "0")) if extent is not None else 0
-        anchor = OxmlElement("wp:anchor")
-        for name, value in {
-            "distT": "0", "distB": "0", "distL": "0", "distR": "0",
-            "simplePos": "0", "relativeHeight": "251658240",
-            "behindDoc": "0", "locked": "0", "layoutInCell": "1",
-            "allowOverlap": "1",
-        }.items():
-            anchor.set(qn(f"wp:{name}"), value)
+        image_height_pt = image_height / 12700
+        top_offset = -(image_height_pt / 2) - float(y_offset_pt)
 
-        simple_pos = OxmlElement("wp:simplePos")
-        simple_pos.set("x", "0")
-        simple_pos.set("y", "0")
-        anchor.append(simple_pos)
-
-        for tag in ("positionH", "positionV"):
-            position = OxmlElement(f"wp:{tag}")
-            position.set(
-                "relativeFrom",
-                "column" if tag == "positionH" else "line",
-            )
-            offset = OxmlElement("wp:posOffset")
-            # 以文字行的中线作为图片中心，避免图片默认偏低。
-            if tag == "positionH":
-                offset.text = "0"
-            else:
-                # Word 坐标单位为 EMU；正数 y_offset_pt 表示向上。
-                offset_emu = -(image_height // 2) - round(float(y_offset_pt) * 12700)
-                offset.text = str(offset_emu)
-            position.append(offset)
-            anchor.append(position)
-
-        for child in list(inline):
-            anchor.append(child)
-        effect_extent = OxmlElement("wp:effectExtent")
-        for name in ("l", "t", "r", "b"):
-            effect_extent.set(name, "0")
-        anchor.insert(4, effect_extent)
-        wrap_none = OxmlElement("wp:wrapNone")
-        anchor.insert(5, wrap_none)
-        inline.getparent().replace(inline, anchor)
+        # python-docx 默认没有注册 VML 的 v/o 前缀，因此此处完整声明命名空间。
+        pict = parse_xml(
+            '<w:pict xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" '
+            'xmlns:v="urn:schemas-microsoft-com:vml" '
+            'xmlns:o="urn:schemas-microsoft-com:office:office" '
+            'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
+            f'<v:shape id="FloatingPicture{run.part.next_id}" type="#_x0000_t75" '
+            'style="position:absolute;'
+            'margin-left:-5pt;'
+            f'margin-top:{top_offset:.2f}pt;'
+            f'width:{image_width:.2f}pt;'
+            f'height:{image_height_pt:.2f}pt;'
+            'z-index:251658240;'
+            'mso-wrap-style:none;'
+            'mso-position-horizontal:left;'
+            'mso-position-horizontal-relative:margin;'
+            'mso-position-vertical-relative:line" '
+            'o:allowincell="f">'
+            f'<v:imagedata r:id="{image_rel_id}" o:title=""/>'
+            '</v:shape>'
+            '</w:pict>'
+        )
+        drawing.getparent().replace(drawing, pict)
 
     @staticmethod
     def clear_footer(section):
@@ -1512,7 +1570,8 @@ class WordFormatter:
     def set_toc_level_style(self, level: int, *, font_name: str | None = None, font_size=None,
                             bold: bool | None = None, color: tuple[int, int, int] | None = None,
                             line_spacing=None, space_before=None, space_after=None,
-                            first_line_indent=None, left_indent=None, alignment=None):
+                            first_line_indent=None, first_line_indent_chars=None,
+                            left_indent=None, alignment=None):
         """设置某一级 TOC 样式。
 
         :param level: 目录层级。
@@ -1523,6 +1582,7 @@ class WordFormatter:
         :param line_spacing: 行距倍数，可选。
         :param space_before/space_after: 段前/段后空白，单位 pt，可选。
         :param first_line_indent: 首行缩进，单位 pt，可选。
+        :param first_line_indent_chars: 首行缩进字符数，可选；设置后优先于 pt 值。
         :param left_indent: 左缩进，单位 pt，可选。
         :param alignment: 对齐方式，可选。
         """
@@ -1534,7 +1594,9 @@ class WordFormatter:
                 "font_name": font_name, "font_size": font_size, "bold": bold,
                 "color": color, "line_spacing": line_spacing,
                 "space_before": space_before, "space_after": space_after,
-                "first_line_indent": first_line_indent, "left_indent": left_indent,
+                "first_line_indent": first_line_indent,
+                "first_line_indent_chars": first_line_indent_chars,
+                "left_indent": left_indent,
                 "alignment": alignment,
             },
         )
@@ -1544,7 +1606,8 @@ class WordFormatter:
                             bold: bool | None = None,
                             color: tuple[int, int, int] | None = None,
                             line_spacing=None, space_before=None, space_after=None,
-                            first_line_indent=None, left_indent=None, alignment=None):
+                            first_line_indent=None, first_line_indent_chars=None,
+                            left_indent=None, alignment=None):
         """创建或更新自定义段落样式。
 
         :param style_name: 样式名称。
@@ -1556,6 +1619,7 @@ class WordFormatter:
         :param line_spacing: 行距倍数，可选。
         :param space_before/space_after: 段前/段后空白，单位 pt，可选。
         :param first_line_indent/left_indent: 缩进，单位 pt，可选。
+        :param first_line_indent_chars: 首行缩进字符数，可选；设置后优先于 pt 值。
         :param alignment: 对齐方式，可选。
         """
         style = self._get_or_create_style(style_name, base_style_name)
@@ -1565,7 +1629,9 @@ class WordFormatter:
                 "font_name": font_name, "font_size": font_size, "bold": bold,
                 "color": color, "line_spacing": line_spacing,
                 "space_before": space_before, "space_after": space_after,
-                "first_line_indent": first_line_indent, "left_indent": left_indent,
+                "first_line_indent": first_line_indent,
+                "first_line_indent_chars": first_line_indent_chars,
+                "left_indent": left_indent,
                 "alignment": alignment,
             },
         )

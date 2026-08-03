@@ -6,6 +6,7 @@ from zipfile import ZipFile
 import pytest
 from docx import Document
 from docx.enum.text import WD_PARAGRAPH_ALIGNMENT
+from docx.oxml.ns import qn
 
 from wc_word_report_tool import WordFormatter
 from wc_word_report_tool.word import FONT_SIZE_MAP, _to_pt
@@ -113,20 +114,122 @@ def test_setup_defaults_only_sets_page_margins():
 
 def test_body_creates_paragraph_with_indent(tmp_path):
     doc = Document()
-    par = WordFormatter.body(doc, "正文内容")
+    par = WordFormatter(doc).body("正文内容")
     assert par.alignment == WD_PARAGRAPH_ALIGNMENT.JUSTIFY
     assert par.paragraph_format.first_line_indent is not None
     assert par.paragraph_format.line_spacing == 1.5
     out = tmp_path / "body.docx"
     doc.save(out)
     document_xml = _read_zip_xml(out, "word/document.xml")
-    assert 'w:eastAsia="仿宋_GB2312"' in document_xml
+    assert 'w:eastAsia="宋体"' in document_xml
+    assert 'w:firstLineChars="200"' in document_xml
+    assert 'w:firstLine="560"' in document_xml
 
 
 def test_body_with_no_indent(tmp_path):
     doc = Document()
-    par = WordFormatter.body(doc, "无缩进", indent=False)
+    par = WordFormatter(doc).body("无缩进", indent=False)
     assert par.paragraph_format.first_line_indent is None
+    out = tmp_path / "body-no-indent.docx"
+    doc.save(out)
+    document_xml = _read_zip_xml(out, "word/document.xml")
+    assert "w:firstLineChars" not in document_xml
+    assert "w:firstLine=" not in document_xml
+
+
+def test_set_paragraph_format_uses_chars_with_pt_fallback(tmp_path):
+    doc = Document()
+    formatter = WordFormatter(doc)
+    par = doc.add_paragraph("自定义字符缩进")
+    formatter.set_paragraph_format(
+        par,
+        first_line_indent_chars=1.5,
+        first_line_indent_pt=21,
+    )
+
+    ind = par._p.pPr.ind
+    assert ind.get(qn("w:firstLineChars")) == "150"
+    assert ind.get(qn("w:firstLine")) == "420"
+
+    out = tmp_path / "paragraph-indent.docx"
+    doc.save(out)
+    document_xml = _read_zip_xml(out, "word/document.xml")
+    assert 'w:firstLineChars="150"' in document_xml
+    assert 'w:firstLine="420"' in document_xml
+
+
+def test_pt_only_indent_removes_existing_character_priority():
+    doc = Document()
+    par = doc.add_paragraph("切换缩进单位")
+    WordFormatter.set_paragraph_format(
+        par,
+        first_line_indent_chars=2,
+        first_line_indent_pt=28,
+    )
+    WordFormatter.set_paragraph_format(par, first_line_indent_pt=14)
+
+    ind = par._p.pPr.ind
+    assert ind.get(qn("w:firstLineChars")) is None
+    assert ind.get(qn("w:firstLine")) == "280"
+
+
+def test_indent_enabled_related_apis_write_chars_and_fallback(tmp_path):
+    doc = Document()
+    formatter = WordFormatter(doc)
+    cover = formatter.cover_text("封面", font_size=16, indent=True)
+    right = formatter.right_text("日期", font_size=16, indent=True)
+    formatter.heading("标题", font_size=16, indent=True)
+
+    for par in (cover, right):
+        ind = par._p.pPr.ind
+        assert ind.get(qn("w:firstLineChars")) == "200"
+        assert ind.get(qn("w:firstLine")) == "640"
+
+    out = tmp_path / "related-indent-apis.docx"
+    doc.save(out)
+    styles_xml = _read_zip_xml(out, "word/styles.xml")
+    assert 'w:firstLineChars="200"' in styles_xml
+    assert 'w:firstLine="640"' in styles_xml
+
+
+def test_paragraph_style_supports_chars_with_pt_fallback(tmp_path):
+    doc = Document()
+    formatter = WordFormatter(doc)
+    formatter.set_paragraph_style(
+        "字符缩进样式",
+        first_line_indent_chars=2,
+        first_line_indent=28,
+    )
+
+    out = tmp_path / "style-indent.docx"
+    doc.save(out)
+    styles_xml = _read_zip_xml(out, "word/styles.xml")
+    assert 'w:firstLineChars="200"' in styles_xml
+    assert 'w:firstLine="560"' in styles_xml
+
+
+def test_toc_style_supports_chars_with_pt_fallback(tmp_path):
+    doc = Document()
+    formatter = WordFormatter(doc)
+    formatter.set_toc_level_style(
+        1,
+        first_line_indent_chars=2,
+        first_line_indent=28,
+    )
+
+    out = tmp_path / "toc-style-indent.docx"
+    doc.save(out)
+    styles_xml = _read_zip_xml(out, "word/styles.xml")
+    assert 'w:firstLineChars="200"' in styles_xml
+    assert 'w:firstLine="560"' in styles_xml
+
+
+@pytest.mark.parametrize("value, error_type", [("two", TypeError), (-1, ValueError)])
+def test_first_line_indent_chars_rejects_invalid_values(value, error_type):
+    doc = Document()
+    par = doc.add_paragraph("无效缩进")
+    with pytest.raises(error_type):
+        WordFormatter.set_paragraph_format(par, first_line_indent_chars=value)
 
 
 def test_heading1_uses_builtin_heading_style(tmp_path):

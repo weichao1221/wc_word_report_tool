@@ -5,7 +5,7 @@
 1. **数字转中文大写**：`number_to_chinese_upper()` 把数字转成人民币金额大写。
 2. **Word 格式化**：`WordFormatter` 提供从封面、正文、表格、页眉页脚到目录、页码的完整覆盖，默认值贴近中国公文标准。
 
-> 版本：v0.4.17
+> 版本：v0.4.20
 > 作者：willcha
 > 许可证：MIT
 > Python：>=3.9
@@ -244,7 +244,7 @@ formatter.heading("1. 一级标题")
 | 方法 | 用途 |
 |------|------|
 | `set_run_font(run, *, cn_font, en_font, size, bold, color, highlight)` | 设置 run 字体 |
-| `set_paragraph_format(paragraph, *, alignment, line_spacing, ...)` | 设置段落格式 |
+| `set_paragraph_format(paragraph, *, alignment, line_spacing, first_line_indent_chars, first_line_indent_pt, ...)` | 设置段落格式；字符缩进优先，pt 缩进兜底 |
 | `resolve_alignment(alignment, *, strict)` | 对齐方式解析 |
 
 ## 字号参数
@@ -281,6 +281,7 @@ formatter.heading("1. 一级标题")
 | `font_size`（字号） | pt 或中文字号 |
 | `space_before/space_after` | pt |
 | `first_line_indent_pt` | pt |
+| `first_line_indent_chars` | 字符数（优先写入 `w:firstLineChars`，pt 值作为兼容兜底） |
 | `border_size`（边框粗细） | 1/8 pt（4 = 0.5pt 细线，8 = 1pt） |
 
 ## 版本说明

@@ -1,4 +1,4 @@
-# wc_word_report_tool
+# wc_word_report_tool [![PyPI Downloads](https://static.pepy.tech/personalized-badge/wc-word-report-tool?period=total&units=INTERNATIONAL_SYSTEM&left_color=BLACK&right_color=GREEN&left_text=downloads)](https://pepy.tech/projects/wc-word-report-tool)
 
 基于 `python-docx` 的中文 Word 报告格式化工具，内置：
 
@@ -316,6 +316,7 @@ formatter.heading("1. 一级标题")
 1. **目录刷新**：`python-docx` 可写入 TOC 域，但目录内容需在 Word/OnlyOffice 打开后刷新（F9 或右键 → 更新域）才会显示页码。
 2. **页码分节**：从某页开始重新编号本质上是"从某个分节开始重新编号"。建议在正文起、附录起等关键节点显式插入分节。
 3. **字体可用性**：默认字体 `仿宋_GB2312` / `楷体` / `黑体` 在 Windows 上预装；macOS / Linux 可能需要额外安装或回退到 `仿宋` / `STKaiti` / `SimHei`。
+
 
 
 ## License

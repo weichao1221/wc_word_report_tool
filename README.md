@@ -317,22 +317,6 @@ formatter.heading("1. 一级标题")
 2. **页码分节**：从某页开始重新编号本质上是"从某个分节开始重新编号"。建议在正文起、附录起等关键节点显式插入分节。
 3. **字体可用性**：默认字体 `仿宋_GB2312` / `楷体` / `黑体` 在 Windows 上预装；macOS / Linux 可能需要额外安装或回退到 `仿宋` / `STKaiti` / `SimHei`。
 
-## 测试
-
-```bash
-cd wc_word_report_tool
-PYTHONPATH=src python3 -m pytest tests/ -q
-```
-
-## 打包与发布
-
-```bash
-cd wc_word_report_tool
-python3 -m pip install --upgrade build twine
-./publish_to_pypi.sh
-# 上一步只负责清理、构建和 twine check；确认通过后正式上传：
-python3 -m twine upload dist/*
-```
 
 ## License
 

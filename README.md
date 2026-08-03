@@ -31,16 +31,15 @@ print(number_to_chinese_upper(123456.78))
 wc-rmb-upper 100200.03
 ```
 
-## 设计理念（v0.4.3）
-
-v0.4.3 对 API 做了收敛，目标：
+## 当前接口约定
 
 1. **覆盖完整**：补齐表格、页眉页脚、文档默认样式等 v0.1.x 缺失能力。
-2. **命名一致**：所有新方法使用 snake_case（`heading` / `body` / `set_header`），告别拼音 + 大小写混杂。
-3. **默认合理**：默认值贴近公文标准（仿宋_GB2312、三号 14pt、1.5 倍行距）。
-4. **严格校验**：未知对齐方式抛 `ValueError` 而非静默降级，便于调试。
+2. **命名一致**：公开方法统一使用 snake_case，例如 `heading`、`body`、`set_header`。
+3. **默认合理**：正文默认宋体、四号（14pt）、首行缩进 2 字符、两端对齐和 1.5 倍行距。
+4. **可选严格校验**：对齐方式默认兼容回退到左对齐；传 `strict=True` 时，未知值抛出 `ValueError`。
 
-格式化器在创建时绑定文档，后续方法不再重复传入 `doc`：
+格式化器在创建时绑定文档。实例方法通过 `formatter` 调用，不再重复传入
+`doc`；只处理独立对象的方法（例如 `set_header(section, ...)`）保留为静态方法：
 
 ```python
 formatter = WordFormatter(doc)
@@ -67,12 +66,12 @@ formatter.set_document_language()
 # setup_defaults 只设置页面参数；正文格式通过 body() 单独设置
 
 # 2. 封面
-WordFormatter.insert_img(doc, "logo.png", width=5)
-WordFormatter.blank_lines(doc, 2)
+formatter.insert_img("logo.png", width=5)
+formatter.blank_lines(2)
 formatter.cover_text("测试项目", font_name="宋体", font_size=22, bold=True)
-WordFormatter.blank_lines(doc, 8)
-WordFormatter.right_text(doc, "委托单位：XXX公司")
-WordFormatter.right_text(doc, "编制单位：YYY公司")
+formatter.blank_lines(8)
+formatter.right_text("委托单位：XXX公司")
+formatter.right_text("编制单位：YYY公司")
 
 # 3. 正文（新节）
 formatter.insert_section()
@@ -81,8 +80,7 @@ formatter.body("本项目位于……，建设内容包括……")
 formatter.body("项目背景说明……")
 
 # 4. 表格
-WordFormatter.add_table(
-    doc,
+formatter.add_table(
     headers=["序号", "项目", "金额（万元）"],
     rows=[
         ["1", "建筑工程", "1200.50"],
@@ -96,7 +94,7 @@ WordFormatter.add_table(
 # 5. 页眉页脚 + 页码从正文开始
 WordFormatter.set_header(doc.sections[1], "测试项目 竣工决算报告", alignment="居中")
 formatter.set_page_number_from_section(start_section_idx=1, start=1,
-                                            prefix="第 ", suffix=" 页")
+                                       prefix="第 ", suffix=" 页")
 
 # 6. 目录
 formatter.add_toc(title="目  录", levels=(1, 3))
@@ -108,26 +106,35 @@ doc.save("demo.docx")
 
 ### 文档级设置
 
-| 方法 | 用途 | 备注 |
-|------|------|------|
-| `set_default_font(doc, *, font_size, cn_font, en_font)` | 设置 Normal 样式默认字体 |
+| 方法 | 用途 |
+|------|------|
+| `set_default_font(*, font_size, cn_font, en_font)` | 设置 Normal 样式默认字体 |
 | `setup_defaults(*, top, bottom, left, right, gutter)` | 一键设置默认页边距；不设置正文格式 |
 | `set_document_language(lang)` | 设置 DOCX 文档语言 |
-| `set_page_margins(doc, *, top, bottom, left, right, gutter, horizontal_alignment)` | 页边距 | 替代 `set_all_layout` / `set_document_layout` |
+| `set_page_margins(*, top, bottom, left, right, gutter, horizontal_alignment)` | 设置页边距和页面水平对齐 |
 
 ### 段落与标题
 
 | 方法 | 用途 |
 |------|------|
-| `body(text, *, font_name, font_size, indent, bold, highlight, alignment)` | 正文段落（首行缩进 + 1.5 倍行距） |
-| `blank_lines(doc, count)` | 批量空行 |
-| `heading(text, *, level, font_name, font_size, bold)` | 通用标题（默认一级标题格式） |
-| `cover_text(doc, text, *, font_name, font_size, bold)` | 封面文本（居中） |
-| `right_text(doc, text, *, font_name, font_size, indent)` | 右对齐段落（公司名/日期） |
-| `created_time(doc, value, *, font_name, font_size, bold)` | 数字日期文本，默认右对齐 |
-| `chinese_date(doc, value, *, font_name, font_size, bold, alignment)` | 中文完整日期，默认居中 |
-| `chinese_year_month(doc, value, *, font_name, font_size, bold, alignment)` | 中文年月，默认居中 |
-| `insert_img(doc, img_path, width, *, alignment)` | 插入图片（width 单位 cm） |
+| `body(text, *, font_name, font_size, indent, bold, highlight, alignment, line_spacing, ...)` | 正文段落；默认字符缩进优先、pt 缩进兜底 |
+| `blank_lines(count)` | 批量添加空行 |
+| `heading(text, *, level, font_name, font_size, bold, indent, ...)` | 通用标题（默认一级标题格式） |
+| `cover_text(text, *, font_name, font_size, bold, alignment, indent, ...)` | 封面文本（默认居中） |
+| `right_text(text, *, font_name, font_size, indent)` | 右对齐段落（公司名/日期） |
+| `created_time(value, *, font_name, font_size, bold)` | 数字日期文本，默认右对齐 |
+| `chinese_date(value, *, font_name, font_size, bold, alignment)` | 中文完整日期，默认居中 |
+| `chinese_year_month(value, *, font_name, font_size, bold, alignment)` | 中文年月，默认居中 |
+| `insert_img(img_path, width, *, alignment)` | 插入图片（width 单位 cm） |
+
+`body(indent=True)` 会同时写入字符单位和绝对长度单位：
+
+```xml
+<w:ind w:firstLine="560" w:firstLineChars="200"/>
+```
+
+其中 `w:firstLineChars="200"` 表示首行缩进 2 字符，在 Word 中优先生效；
+`w:firstLine` 按当前字号计算，用于不识别字符缩进的兼容程序。
 
 ### 结算封面与签发页
 
@@ -160,19 +167,19 @@ formatter.qianfaye(
 ```
 
 `compiling_unit`、`report_title`、`logo_width` 可按项目覆盖；封面还可传
-`info_blank_lines`，签发页还可传 `footer_text`。
+`info_blank_lines`，签发页还可传 `footer_text` 和 `logo_y_offset_pt`。
+`logo_y_offset_pt` 单位为 pt，正数上移、负数下移。
 
 ### 表格
 
 | 方法 | 用途 |
 |------|------|
-| `add_table(doc, headers, rows, *, col_widths, font_size, header_bold, alignment, border_color, border_size)` | 一站式创建带表头表格 |
+| `add_table(headers, rows, *, col_widths, font_size, header_bold, alignment, border_color, border_size)` | 一站式创建带表头表格 |
 | `set_cell(cell, text, *, font_name, font_size, bold, alignment, line_spacing)` | 设置单元格格式（支持加粗/对齐） |
 | `set_table_borders(table, *, color, size)` | 为表格添加边框 |
 
 ```python
-WordFormatter.add_table(
-    doc,
+formatter.add_table(
     headers=["序号", "项目", "金额"],
     rows=[["1", "建安费", "1200"], ["2", "设备费", "850"]],
     col_widths=[2, 5, 3],          # cm
@@ -206,13 +213,13 @@ WordFormatter.set_header_image(doc.sections[1], "logo.png", width=3)
 | `add_page_number(paragraph, *, prefix, suffix, alignment, font_name, font_size)` | 向段落添加 PAGE 域 |
 | `add_footer_page_number(section, *, prefix, suffix, ...)` | 节页脚添加页码 |
 | `restart_page_numbering(section, *, start, add_footer_number, ...)` | 重启单节页码 |
-| `insert_section_with_page_numbering(doc, *, start_page_number, ...)` | 插入节并重启页码（组合方法） |
-| `set_page_number_from_section(doc, start_section_idx, *, start, ...)` | **跨节页码**：从指定节起编号，之前节无页码 |
+| `insert_section_with_page_numbering(*, start_page_number, ...)` | 插入节并重启页码（组合方法） |
+| `set_page_number_from_section(start_section_idx, *, start, ...)` | **跨节页码**：从指定节起编号，之前节无页码 |
 
 ```python
 # 文档有 3 个节：0=前置（封面/扉页/目录）, 1=正文起, 2=正文续
-WordFormatter.set_page_number_from_section(
-    doc, start_section_idx=1, start=1,
+formatter.set_page_number_from_section(
+    start_section_idx=1, start=1,
     prefix="第 ", suffix=" 页", alignment="居中",
 )
 # 节0 无页码，节1 从"第 1 页"开始，节2 链接前节延续编号
@@ -225,7 +232,7 @@ WordFormatter.set_page_number_from_section(
 | `add_toc(*, title, levels, title_style, toc_level_styles, ...)` | 插入 Word 目录域（TOC field）；标题默认使用 Normal 样式 |
 | `set_toc_level_style(level, *, font_name, ...)` | 设置某一级 TOC 样式 |
 | `set_paragraph_style(style_name, *, base_style_name, ...)` | 创建/更新自定义段落样式 |
-| `add_custom_heading(text, *, style_name, level, ...)` | 使用自定义样式添加标题 |
+| `add_custom_heading(text_content, *, style_name, level, ...)` | 使用自定义样式添加标题 |
 
 ```python
 formatter.add_toc(
@@ -286,8 +293,23 @@ formatter.heading("1. 一级标题")
 
 ## 版本说明
 
-v0.4.3 起只保留当前 API，不提供旧方法名兼容层。常用入口为
-`setup_defaults`、`cover_text`、`heading`、`body` 和日期方法。
+### v0.4.20
+
+- 正文及带 `indent=True` 的相关接口优先写入 `w:firstLineChars="200"`。
+- 按字号计算的 `w:firstLine` 继续保留为兼容兜底。
+- `set_paragraph_format()`、TOC 样式和自定义段落样式新增
+  `first_line_indent_chars` 参数。
+- `right_text()` 的 pt 兜底值改为跟随实际字号计算。
+
+### v0.4.19
+
+- 浮动页眉图片改用 Word 兼容的 VML 结构。
+- 页眉图片与标题文字可同时保留，并支持 `logo_y_offset_pt` 垂直调整。
+
+### v0.4.3
+
+- API 收敛为 snake_case；实例方法统一通过 `WordFormatter(doc)` 绑定的格式化器调用。
+- 不再提供旧方法名兼容层。
 
 ## 注意事项
 
@@ -302,12 +324,14 @@ cd wc_word_report_tool
 PYTHONPATH=src python3 -m pytest tests/ -q
 ```
 
-## 打包上传
+## 打包与发布
 
 ```bash
 cd wc_word_report_tool
 python3 -m pip install --upgrade build twine
 ./publish_to_pypi.sh
+# 上一步只负责清理、构建和 twine check；确认通过后正式上传：
+python3 -m twine upload dist/*
 ```
 
 ## License

@@ -5,7 +5,7 @@
 1. **数字转中文大写**：`number_to_chinese_upper()` 把数字转成人民币金额大写。
 2. **Word 格式化**：`WordFormatter` 提供从封面、正文、表格、页眉页脚到目录、页码的完整覆盖，默认值贴近中国公文标准。
 
-> 版本：v0.4.20
+> 版本：v0.6.0
 > 作者：willcha
 > 许可证：MIT
 > Python：>=3.9
@@ -293,6 +293,15 @@ formatter.heading("1. 一级标题")
 
 ## 版本说明
 
+### v0.6.0
+
+- 新增 **MCP 服务端**（可选依赖 `mcp`），把 `WordFormatter` 的完整能力暴露成 AI 可调用的工具。
+- 新增命令 `wc-report-mcp`，支持 `stdio` 与 `streamable-http` 两种传输。
+- 主库依赖不变（仍只有 `python-docx`），MCP 依赖通过 `pip install wc_word_report_tool[mcp]` 安装。
+- 修复 `tests/test_word_formatter.py` 中残留的旧 API 测试，测试套件恢复全绿。
+  注意：v0.4.3 已移除的旧方法名（`Heading_1`、`Normal_doc`、`set_all_layout` 等）
+  不再提供兼容层，相关测试已删除。
+
 ### v0.4.20
 
 - 正文及带 `indent=True` 的相关接口优先写入 `w:firstLineChars="200"`。
@@ -316,6 +325,100 @@ formatter.heading("1. 一级标题")
 1. **目录刷新**：`python-docx` 可写入 TOC 域，但目录内容需在 Word/OnlyOffice 打开后刷新（F9 或右键 → 更新域）才会显示页码。
 2. **页码分节**：从某页开始重新编号本质上是"从某个分节开始重新编号"。建议在正文起、附录起等关键节点显式插入分节。
 3. **字体可用性**：默认字体 `仿宋_GB2312` / `楷体` / `黑体` 在 Windows 上预装；macOS / Linux 可能需要额外安装或回退到 `仿宋` / `STKaiti` / `SimHei`。
+
+
+
+## MCP 服务端
+
+把上面的能力包装成 [MCP](https://modelcontextprotocol.io) 工具，接入 Claude Desktop、
+Cursor、Command Code 等客户端后，就可以让 AI 直接编制 Word 报告。
+
+### 安装与启动
+
+```bash
+pip install "wc_word_report_tool[mcp]"   # 需要 Python >= 3.10
+wc-report-mcp                            # stdio（默认）
+wc-report-mcp --transport streamable-http --port 8000
+```
+
+客户端配置（以 `~/wc-reports` 为输出目录）：
+
+```json
+{
+  "mcpServers": {
+    "wc-word-report": {
+      "command": "wc-report-mcp",
+      "env": { "WC_REPORT_MCP_OUTPUT_DIR": "/Users/yourname/wc-reports" }
+    }
+  }
+}
+```
+
+### 环境变量
+
+| 变量 | 用途 |
+|------|------|
+| `WC_REPORT_MCP_OUTPUT_DIR` | 保存文档的根目录，默认 `~/wc-reports`。相对路径都挂在这下面 |
+| `WC_REPORT_MCP_DEFAULT_LOGO` | 默认 Logo 图片路径；封面/签发页未显式传图时使用 |
+
+### 典型流程
+
+```
+word_create_report            → 拿到 doc_id
+word_add_cover_page           → 封面（需 Logo）
+word_set_default_font         → 正文字体（建议显式指定本机已装字体）
+word_insert_section           → 正文另起一节
+word_add_toc                  → 目录
+word_add_heading / word_add_body_list / word_add_table ...
+word_set_header / word_set_footer
+word_set_page_numbers         → 正文从第 1 页开始编号
+word_save_report              → 落盘，返回绝对路径
+```
+
+### 工具清单
+
+| 分组 | 工具 |
+|------|------|
+| 会话 | `word_create_report`、`word_open_report`、`word_save_report`、`word_close_report`、`word_describe_report` |
+| 文档级设置 | `word_set_default_font`、`word_set_page_margins`、`word_set_document_language` |
+| 段落与标题 | `word_add_heading`、`word_add_body`、`word_add_body_list`、`word_add_blank_lines`、`word_add_cover_text`、`word_add_right_text`、`word_add_date`、`word_insert_image` |
+| 表格 | `word_add_table`、`word_format_cell`、`word_set_table_borders` |
+| 页眉页脚 | `word_set_header`、`word_set_footer`、`word_clear_header_footer`、`word_set_header_image` |
+| 节与页码 | `word_insert_section`、`word_set_page_numbers`、`word_restart_page_numbering`、`word_set_page_number_start` |
+| 目录与样式 | `word_add_toc`、`word_set_toc_level_style`、`word_set_paragraph_style`、`word_add_custom_heading` |
+| 模板化组合 | `word_add_cover_page`、`word_add_signature_page` |
+| 独立工具 | `word_rmb_upper`（数字转大写，不需要 doc_id） |
+| 兜底 | `word_describe_api`、`word_call` |
+
+图片类参数（`word_insert_image`、`word_set_header_image`、`word_add_cover_page`、
+`word_add_signature_page`）同时接受 `image_path` 和 `image_base64`，后者支持裸串或
+`data:image/png;base64,...` 形式 —— 便于 AI 在拿不到本地文件路径时使用。
+
+`section_index` / `table_index` 默认 `-1`，表示最后一节 / 最后一个表格。
+
+### 兜底能力：全量覆盖
+
+`WordFormatter` 的每个公开方法都能通过兜底工具调用，因此不存在"某个能力没被包装就用不了"的情况：
+
+```
+word_describe_api()                              → 列出全部方法与签名
+word_call(doc_id, "set_toc_level_style", {"level": 1, "font_size": 14})
+```
+
+`word_call` 的 `section` / `table` 参数可以直接传整数索引（`-1` 表示最后一个），
+服务端会自动换成真实对象。
+
+### 已知限制
+
+1. **目录页码需刷新**：TOC/PAGE 是 Word 域，`python-docx` 只能写入域代码、渲染不出页码。
+   本工具会写入 `updateFields` 标记，Word / OnlyOffice 打开时会自动刷新（F9 可手动刷新）；
+   LibreOffice / Google Docs 不保证。因此 AI 无法自行校验目录页码，生成后请人工打开确认。
+2. **字体依赖服务端机器**：默认的 `仿宋_GB2312` / `黑体` / `方正小标宋简体` 在 Windows 上预装，
+   macOS / Linux 缺失时会静默回退，排版与预期不符。建议在会话开始时显式调用
+   `word_set_default_font` 指定本机可用字体。
+3. **会话不持久**：`doc_id` 只存在于服务端进程内存中，进程重启后失效；
+   已保存的 `.docx` 可以用 `word_open_report` 重新载入。
+4. **MCP 需要 Python ≥ 3.10**；主库本身仍支持 3.9。
 
 
 

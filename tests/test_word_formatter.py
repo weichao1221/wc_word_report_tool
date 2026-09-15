@@ -61,8 +61,8 @@ def test_font_size_map_contains_common_sizes():
 
 def test_set_default_font_sets_normal_style(tmp_path):
     doc = Document()
-    WordFormatter.set_default_font(doc, font_size="三号",
-                                    cn_font="仿宋_GB2312", en_font="Times New Roman")
+    WordFormatter(doc).set_default_font(font_size="三号",
+                                        cn_font="仿宋_GB2312", en_font="Times New Roman")
     out = tmp_path / "default_font.docx"
     doc.save(out)
 
@@ -72,9 +72,9 @@ def test_set_default_font_sets_normal_style(tmp_path):
     assert 'w:sz w:val="32"' in styles_xml  # 16pt = 32 half-points
 
 
-def test_set_language_sets_zh_cn(tmp_path):
+def test_set_document_language_sets_zh_cn(tmp_path):
     doc = Document()
-    WordFormatter.set_language(doc, "zh-CN")
+    WordFormatter(doc).set_document_language("zh-CN")
     out = tmp_path / "lang.docx"
     doc.save(out)
 
@@ -85,7 +85,7 @@ def test_set_language_sets_zh_cn(tmp_path):
 
 def test_set_page_margins(tmp_path):
     doc = Document()
-    WordFormatter.set_page_margins(doc, top=2.5, left=2.6)
+    WordFormatter(doc).set_page_margins(top=2.5, left=2.6)
     out = tmp_path / "margins.docx"
     doc.save(out)
     document_xml = _read_zip_xml(out, "word/document.xml")
@@ -232,9 +232,9 @@ def test_first_line_indent_chars_rejects_invalid_values(value, error_type):
         WordFormatter.set_paragraph_format(par, first_line_indent_chars=value)
 
 
-def test_heading1_uses_builtin_heading_style(tmp_path):
+def test_heading_uses_builtin_heading_style(tmp_path):
     doc = Document()
-    paragraph = WordFormatter.heading1(doc, "一级标题")
+    paragraph = WordFormatter(doc).heading("一级标题", level=1)
     out = tmp_path / "h1.docx"
     doc.save(out)
 
@@ -243,23 +243,23 @@ def test_heading1_uses_builtin_heading_style(tmp_path):
     assert 'w:pStyle w:val="Heading1"' in document_xml
 
 
-def test_heading2_is_bold(tmp_path):
+def test_heading_supports_bold(tmp_path):
     doc = Document()
-    par = WordFormatter.heading2(doc, "二级")
+    par = WordFormatter(doc).heading("二级", level=2, bold=True)
     out = tmp_path / "h2.docx"
     doc.save(out)
     assert par.runs[0].font.bold is True
 
 
-def test_heading3_is_not_bold():
+def test_heading_is_not_bold_by_default():
     doc = Document()
-    par = WordFormatter.heading3(doc, "三级")
+    par = WordFormatter(doc).heading("三级", level=3)
     assert par.runs[0].font.bold is False
 
 
 def test_cover_text_is_centered_and_bold():
     doc = Document()
-    par = WordFormatter.cover_text(doc, "项目名", font_size=22, bold=True)
+    par = WordFormatter(doc).cover_text("项目名", font_size=22, bold=True)
     assert par.alignment == WD_PARAGRAPH_ALIGNMENT.CENTER
     assert par.runs[0].font.bold is True
     assert par.runs[0].font.size.pt == 22
@@ -268,7 +268,7 @@ def test_cover_text_is_centered_and_bold():
 def test_blank_lines_creates_n_paragraphs():
     doc = Document()
     initial = len(doc.paragraphs)
-    WordFormatter.blank_lines(doc, 3)
+    WordFormatter(doc).blank_lines(3)
     assert len(doc.paragraphs) == initial + 3
 
 
@@ -313,14 +313,14 @@ def test_qianfaye_creates_section_and_personnel_table(tmp_path):
 
 def test_right_text_is_right_aligned():
     doc = Document()
-    par = WordFormatter.right_text(doc, "公司名")
+    par = WordFormatter(doc).right_text("公司名")
     assert par.alignment == WD_PARAGRAPH_ALIGNMENT.RIGHT
 
 
 def test_created_time_uses_today():
     import datetime
     doc = Document()
-    par = WordFormatter.created_time(doc)
+    par = WordFormatter(doc).created_time()
     today = datetime.datetime.now().strftime("%Y年%m月%d日")
     assert today in par.text
 
@@ -360,7 +360,7 @@ def test_add_table_creates_table_with_headers(tmp_path):
     doc = Document()
     headers = ["序号", "项目", "金额"]
     rows = [["1", "建安费", "1200"], ["2", "设备费", "850"]]
-    table = WordFormatter.add_table(doc, headers, rows, col_widths=[2, 5, 3])
+    table = WordFormatter(doc).add_table(headers, rows, col_widths=[2, 5, 3])
 
     out = tmp_path / "table.docx"
     doc.save(out)
@@ -488,8 +488,8 @@ def test_set_page_number_from_section_clears_previous_sections(tmp_path):
     doc.add_section(WD_SECTION_START.NEW_PAGE)
     doc.add_paragraph("正文第二页")
 
-    WordFormatter.set_page_number_from_section(
-        doc, start_section_idx=1, start=1, prefix="第 ", suffix=" 页",
+    WordFormatter(doc).set_page_number_from_section(
+        start_section_idx=1, start=1, prefix="第 ", suffix=" 页",
     )
     out = tmp_path / "page_number_from_section.docx"
     doc.save(out)
@@ -519,7 +519,7 @@ def test_set_page_number_from_section_clears_previous_sections(tmp_path):
 def test_set_page_number_from_section_invalid_index_raises():
     doc = Document()
     with pytest.raises(ValueError, match="超出范围"):
-        WordFormatter.set_page_number_from_section(doc, start_section_idx=99)
+        WordFormatter(doc).set_page_number_from_section(start_section_idx=99)
 
 
 # ====================================================================
@@ -556,65 +556,13 @@ def test_resolve_alignment_supports_enum():
 
 
 # ====================================================================
-# 向后兼容（旧 API 仍可用，但发 DeprecationWarning）
-# ====================================================================
-
-def test_old_api_heading_1_still_works(tmp_path, recwarn):
-    doc = Document()
-    paragraph = WordFormatter.Heading_1(doc, "一级标题")
-    out = tmp_path / "old_api.docx"
-    doc.save(out)
-
-    assert paragraph.style.name == "Heading 1"
-    # 应该有 DeprecationWarning
-    assert any(issubclass(w.category, DeprecationWarning) for w in recwarn)
-
-
-def test_old_api_normal_doc_still_works(tmp_path, recwarn):
-    doc = Document()
-    par = WordFormatter.Normal_doc(doc, "正文")
-    out = tmp_path / "old_normal.docx"
-    doc.save(out)
-
-    assert par.paragraph_format.line_spacing == 1.5
-    assert any(issubclass(w.category, DeprecationWarning) for w in recwarn)
-
-
-def test_old_api_fengmian_doc1_still_works(recwarn):
-    doc = Document()
-    par = WordFormatter.fengmian_doc1(doc, "项目名")
-    assert par.alignment == WD_PARAGRAPH_ALIGNMENT.CENTER
-    assert par.runs[0].font.bold is True
-    assert any(issubclass(w.category, DeprecationWarning) for w in recwarn)
-
-
-def test_old_api_set_all_layout_still_works(tmp_path, recwarn):
-    doc = Document()
-    WordFormatter.set_all_layout(doc, top=2.5)
-    out = tmp_path / "old_layout.docx"
-    doc.save(out)
-
-    document_xml = _read_zip_xml(out, "word/document.xml")
-    assert 'w:top="1417"' in document_xml  # 2.5cm
-    assert any(issubclass(w.category, DeprecationWarning) for w in recwarn)
-
-
-def test_old_api_set_cell_format_falls_back_to_set_cell(recwarn):
-    doc = Document()
-    table = doc.add_table(rows=1, cols=1)
-    WordFormatter.set_cell_format(table.rows[0].cells[0], "内容")
-    assert table.rows[0].cells[0].paragraphs[0].text == "内容"
-    assert any(issubclass(w.category, DeprecationWarning) for w in recwarn)
-
-
-# ====================================================================
-# 原有测试（保持兼容）
+# 页码与目录
 # ====================================================================
 
 def test_restart_page_numbering_unlinks_footer_and_sets_start(tmp_path):
     doc = Document()
-    section = WordFormatter.insert_section_with_page_numbering(
-        doc, start_page_number=1, prefix="第", suffix="页",
+    section = WordFormatter(doc).insert_section_with_page_numbering(
+        start_page_number=1, prefix="第", suffix="页",
     )
     out = tmp_path / "page.docx"
     doc.save(out)
@@ -631,14 +579,15 @@ def test_restart_page_numbering_unlinks_footer_and_sets_start(tmp_path):
 
 def test_add_toc_with_custom_style_mapping(tmp_path):
     doc = Document()
-    WordFormatter.set_paragraph_style(doc, "MyHeading1", font_name="黑体",
-                                       font_size=14, bold=True)
-    WordFormatter.add_toc(
-        doc, levels=(1, 3), use_outline_levels=True,
+    formatter = WordFormatter(doc)
+    formatter.set_paragraph_style("MyHeading1", font_name="黑体",
+                                  font_size=14, bold=True)
+    formatter.add_toc(
+        levels=(1, 3), use_outline_levels=True,
         custom_style_levels={"MyHeading1": 1},
         toc_level_styles={1: {"font_name": "黑体", "font_size": 14, "bold": True}},
     )
-    WordFormatter.add_custom_heading(doc, "自定义标题", style_name="MyHeading1", level=1)
+    formatter.add_custom_heading("自定义标题", style_name="MyHeading1", level=1)
 
     out = tmp_path / "toc.docx"
     doc.save(out)
@@ -652,9 +601,9 @@ def test_add_toc_with_custom_style_mapping(tmp_path):
     assert 'styleId="TOC1"' in styles_xml or 'styleId="TOC 1"' in styles_xml
 
 
-def test_normal_doc_supports_custom_font_name_and_size(tmp_path):
+def test_body_supports_custom_font_name_and_size(tmp_path):
     doc = Document()
-    WordFormatter.Normal_doc(doc, "正文", font_name="黑体", font_size=18)
+    WordFormatter(doc).body("正文", font_name="黑体", font_size=18)
     out = tmp_path / "font.docx"
     doc.save(out)
 
@@ -663,9 +612,9 @@ def test_normal_doc_supports_custom_font_name_and_size(tmp_path):
     assert 'w:sz w:val="36"' in document_xml
 
 
-def test_set_document_layout_supports_numeric_alignment(tmp_path):
+def test_set_page_margins_supports_numeric_alignment(tmp_path):
     doc = Document()
-    WordFormatter.set_document_layout(doc, left=2.5, right=2.6, horizontal_alignment=2)
+    WordFormatter(doc).set_page_margins(left=2.5, right=2.6, horizontal_alignment=2)
     out = tmp_path / "layout.docx"
     doc.save(out)
 

@@ -1064,3 +1064,70 @@ def test_insert_img_is_inline_by_default(tmp_path):
     document_xml = _read_zip_xml(out, "word/document.xml")
     assert "w:pict" not in document_xml
     assert "wp:inline" in document_xml
+
+
+# ====================================================================
+# 表格参数自洽性校验：越界要给人看得懂的错误，而不是 IndexError
+# ====================================================================
+
+def test_add_table_rejects_col_widths_longer_than_headers():
+    """OCR 曾产出「表头 1 列、列宽 4 个」，旧代码抛的是 tuple index out of range。"""
+    doc = Document()
+
+    with pytest.raises(ValueError, match="col_widths 有 4 项，超过表头的 1 列"):
+        WordFormatter(doc).add_table(
+            headers=["合并表头"],
+            rows=[["a", "b", "c", "d"]],
+            col_widths=[1, 2, 3, 4],
+        )
+
+
+def test_add_table_rejects_row_wider_than_headers():
+    doc = Document()
+
+    with pytest.raises(ValueError) as excinfo:
+        WordFormatter(doc).add_table(headers=["A", "B"], rows=[["1", "2"], ["3", "4", "5"]])
+
+    message = str(excinfo.value)
+    assert "第 2 行数据有 3 个单元格" in message
+    assert "超过表头的 2 列" in message
+
+
+def test_add_table_rejects_empty_headers():
+    doc = Document()
+
+    with pytest.raises(ValueError, match="headers 不能为空"):
+        WordFormatter(doc).add_table(headers=[], rows=[])
+
+
+def test_add_table_rejects_extra_row_heights():
+    doc = Document()
+
+    with pytest.raises(ValueError, match="row_heights 有 5 项，超过表格的 3 行"):
+        WordFormatter(doc).add_table(
+            headers=["A"], rows=[["1"], ["2"]], row_heights=[1, 1, 1, 1, 1],
+        )
+
+
+def test_add_table_still_allows_ragged_short_rows():
+    """短行是合法输入：缺的格子留空即可，不该报错。"""
+    doc = Document()
+
+    table = WordFormatter(doc).add_table(
+        headers=["A", "B", "C"], rows=[["1"], ["2", "3"]],
+    )
+
+    assert len(table.rows) == 3
+    assert len(table.columns) == 3
+
+
+def test_add_table_error_does_not_leave_a_stray_table():
+    """校验要在建表之前完成，失败时不应往文档里塞一张空表。"""
+    doc = Document()
+
+    with pytest.raises(ValueError):
+        WordFormatter(doc).add_table(
+            headers=["A", "B"], rows=[["1", "2", "3"]],
+        )
+
+    assert len(doc.tables) == 0

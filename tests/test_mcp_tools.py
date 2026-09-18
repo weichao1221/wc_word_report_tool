@@ -810,3 +810,44 @@ def test_insert_image_is_inline_by_default():
     assert "w:pict" not in _read_zip_xml(
         Path(saved["saved_to"]), "word/document.xml"
     )
+
+
+def test_add_table_grid_mismatch_becomes_readable_tool_error():
+    """列数对不上时必须给 AI 看得懂的错误，而不是 IndexError。"""
+    doc_id = tools.word_create_report()["doc_id"]
+
+    with pytest.raises(ToolError) as excinfo:
+        tools.word_add_table(
+            doc_id,
+            headers=["合并表头"],
+            rows=[["a", "b", "c", "d"]],
+            col_widths=[1, 2, 3, 4],
+        )
+
+    message = str(excinfo.value)
+    assert "col_widths 有 4 项" in message
+    assert "超过表头的 1 列" in message
+    assert "tuple index out of range" not in message
+
+
+def test_add_table_row_width_mismatch_reports_row_number():
+    doc_id = tools.word_create_report()["doc_id"]
+
+    with pytest.raises(ToolError) as excinfo:
+        tools.word_add_table(doc_id, headers=["A", "B"], rows=[["1", "2"], ["3", "4", "5"]])
+
+    assert "第 2 行数据有 3 个单元格" in str(excinfo.value)
+
+
+def test_failed_add_table_does_not_corrupt_the_session():
+    """工具报错后会话仍可用，且没有留下半张表。"""
+    doc_id = tools.word_create_report()["doc_id"]
+
+    with pytest.raises(ToolError):
+        tools.word_add_table(doc_id, headers=["A", "B"], rows=[["1", "2", "3"]])
+
+    described = tools.word_describe_report(doc_id)
+    assert described["tables"] == 0
+
+    tools.word_add_table(doc_id, headers=["A", "B"], rows=[["1", "2"]])
+    assert tools.word_describe_report(doc_id)["tables"] == 1

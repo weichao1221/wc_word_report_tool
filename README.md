@@ -217,6 +217,15 @@ formatter.add_table(
 合并区域的内容取**左上角**单元格的值，被覆盖位置的值会被忽略。索引从 0 开始，
 `rowspan` / `colspan` 至少为 1，越界或互相重叠会直接抛 `ValueError`。
 
+**列数必须自洽**：每行的单元格数不能多于表头列数，`col_widths` 也不能长于列数，
+`row_heights` 不能多于总行数——不齐会抛 `ValueError` 并指出是第几行，而不是让表格静默错列。
+短行是允许的（缺的格子留空）：
+
+```python
+formatter.add_table(headers=["A", "B", "C"], rows=[["1"], ["2", "3"]])   # OK，缺格留空
+formatter.add_table(headers=["A"], rows=[["1", "2"]])                    # ValueError：第 1 行数据有 2 个单元格，超过表头的 1 列
+```
+
 ```python
 # 等价写法：tuples 也接受
 merges=[(1, 2, 1, 2)]        # (row, col, rowspan, colspan)
@@ -387,6 +396,16 @@ formatter.heading("1. 一级标题")
 | `border_size`（边框粗细） | 1/8 pt（4 = 0.5pt 细线，8 = 1pt） |
 
 ## 版本说明
+
+### v0.7.1
+
+- **`add_table()` 增加表格参数的自洽性校验**：`headers` / `rows` / `col_widths` / `row_heights`
+  长度对不上时直接抛 `ValueError`，并指出是第几行、表头是什么；校验在建表**之前**完成，
+  失败不会在文档里留下半张空表。
+  修复前越界只会抛 `IndexError: tuple index out of range`，对调用方毫无指向性——
+  实测把「表头 1 列、数据行 4 列、列宽 4 个」这组参数（来自横跨整行的合并表头）喂进去时，
+  12 张表里有 2 张静默失败。
+- 短行仍然允许（缺的格子留空），只有「多于表头列数」才报错。
 
 ### v0.7.0
 

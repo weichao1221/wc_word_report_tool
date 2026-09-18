@@ -9,7 +9,7 @@
 3. **默认合理**：默认值贴近中国公文标准（仿宋_GB2312、三号 14pt、1.5 倍行距）。
 4. **严格校验**：未知参数抛 ValueError 而非静默降级，便于调试。
 
-版本：v0.7.0
+版本：v0.7.1
 作者：willcha
 """
 
@@ -1230,6 +1230,36 @@ class WordFormatter:
             paragraph._p.getparent().remove(paragraph._p)
         return cell
 
+    @staticmethod
+    def _validate_table_grid(headers, rows, col_widths=None, row_heights=None):
+        """校验表格参数自洽，把「列数对不上」变成可读的错误。
+
+        这里刻意不做静默修正：``headers`` / ``rows`` / ``col_widths`` 的长度必须相互自洽，
+        否则表格会整体错列。而越界时 python-docx 只会抛
+        ``IndexError: tuple index out of range``——对调用方毫无指向性，
+        实测 OCR 产出「表头 1 列、数据行 4 列、列宽 4 个」时排查了很久。
+        """
+        if not headers:
+            raise ValueError("headers 不能为空，至少需要一列表头。")
+        col_count = len(headers)
+        if col_widths is not None and len(col_widths) > col_count:
+            raise ValueError(
+                f"col_widths 有 {len(col_widths)} 项，超过表头的 {col_count} 列"
+                f"（表头：{list(headers)}）。请让列宽数量与表头列数一致。"
+            )
+        for index, row in enumerate(rows):
+            if len(row) > col_count:
+                raise ValueError(
+                    f"第 {index + 1} 行数据有 {len(row)} 个单元格，超过表头的 {col_count} 列"
+                    f"（表头：{list(headers)}）。每行的单元格数不能多于表头列数。"
+                )
+        row_count = 1 + len(rows)
+        if row_heights is not None and len(row_heights) > row_count:
+            raise ValueError(
+                f"row_heights 有 {len(row_heights)} 项，超过表格的 {row_count} 行"
+                f"（1 行表头 + {len(rows)} 行数据）。"
+            )
+
     def add_table(self, headers, rows, *, col_widths=None, font_size=12,
                   header_bold: bool = True, alignment="居中",
                   font_name: str = DEFAULT_CN_FONT,
@@ -1237,6 +1267,10 @@ class WordFormatter:
                   merges=None, row_heights=None, table_width_cm=None,
                   cell_font_names=None):
         """一站式创建带表头的表格。
+
+        ``headers`` 与 ``rows`` 组成**矩形网格**：每行的单元格数不能多于表头列数，
+        ``col_widths`` 也不能长于列数；长度不齐会直接抛 ``ValueError`` 并指出是第几行，
+        不做静默修正（静默修正会让表格整体错列）。
 
         :param headers: 表头文本列表，如 ["序号", "项目", "金额"]。
         :param rows: 二维数据列表，每个子列表为一行。
@@ -1257,6 +1291,7 @@ class WordFormatter:
         """
         row_count = 1 + len(rows)
         col_count = len(headers)
+        self._validate_table_grid(headers, rows, col_widths, row_heights)
         table = self.doc.add_table(rows=row_count, cols=col_count)
         table.alignment = WD_TABLE_ALIGNMENT.CENTER
         self.set_table_borders(table, color=border_color, size=border_size)

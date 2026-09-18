@@ -9,19 +9,26 @@
 3. **默认合理**：默认值贴近中国公文标准（仿宋_GB2312、三号 14pt、1.5 倍行距）。
 4. **严格校验**：未知参数抛 ValueError 而非静默降级，便于调试。
 
-版本：v0.6.0
+版本：v0.7.0
 作者：willcha
 """
 
 from __future__ import annotations
 
 import datetime as _datetime
+import io
 from pathlib import Path
 
 from docx.enum.style import WD_STYLE_TYPE
-from docx.enum.section import WD_SECTION_START
+from docx.enum.section import WD_ORIENT, WD_SECTION_START
 from docx.enum.table import WD_ROW_HEIGHT_RULE, WD_TABLE_ALIGNMENT
-from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_COLOR_INDEX, WD_PARAGRAPH_ALIGNMENT
+from docx.enum.text import (
+    WD_ALIGN_PARAGRAPH,
+    WD_COLOR_INDEX,
+    WD_PARAGRAPH_ALIGNMENT,
+    WD_TAB_ALIGNMENT,
+)
+from docx.image.image import Image as _DocxImage
 from docx.oxml import OxmlElement, parse_xml
 from docx.oxml.ns import qn
 from docx.shared import Cm, Pt, RGBColor
@@ -48,6 +55,51 @@ DEFAULT_EN_FONT = "Times New Roman"
 DEFAULT_BODY_SIZE = 14          # 四号
 DEFAULT_HEADER_FOOTER_FONT = "楷体"
 DEFAULT_HEADER_FOOTER_SIZE = 9  # 小五号
+
+# 页码/编号格式 -> OOXML `w:pgNumType/@w:fmt` 取值。
+# 中文报告的封面与目录常用罗马数字（Ⅰ/Ⅱ），正文才用阿拉伯数字。
+PAGE_NUMBER_FORMATS = {
+    # 阿拉伯数字
+    "decimal": "decimal", "arabic": "decimal", "阿拉伯数字": "decimal",
+    "数字": "decimal", "1": "decimal",
+    # 罗马数字
+    "upperRoman": "upperRoman", "大写罗马": "upperRoman", "I": "upperRoman",
+    "lowerRoman": "lowerRoman", "小写罗马": "lowerRoman", "i": "lowerRoman",
+    # 中文数字
+    "chineseCounting": "chineseCounting", "中文数字": "chineseCounting",
+    "chineseCountingThousand": "chineseCountingThousand",
+    "中文数字千": "chineseCountingThousand", "一": "chineseCountingThousand",
+    # 带圈数字 / 其他常见样式
+    "decimalEnclosedCircle": "decimalEnclosedCircle",
+    "带圈数字": "decimalEnclosedCircle", "①": "decimalEnclosedCircle",
+    "decimalFullWidth": "decimalFullWidth", "全角数字": "decimalFullWidth",
+    "decimalZero": "decimalZero", "前导零数字": "decimalZero",
+    "upperLetter": "upperLetter", "大写字母": "upperLetter", "A": "upperLetter",
+    "lowerLetter": "lowerLetter", "小写字母": "lowerLetter", "a": "lowerLetter",
+}
+
+# 纸张方向 -> (WD_ORIENT 枚举, OOXML `w:orient` 取值)
+ORIENTATION_MAP = {
+    "纵向": (WD_ORIENT.PORTRAIT, "portrait"),
+    "竖排": (WD_ORIENT.PORTRAIT, "portrait"),
+    "portrait": (WD_ORIENT.PORTRAIT, "portrait"),
+    "P": (WD_ORIENT.PORTRAIT, "portrait"),
+    "横向": (WD_ORIENT.LANDSCAPE, "landscape"),
+    "横排": (WD_ORIENT.LANDSCAPE, "landscape"),
+    "landscape": (WD_ORIENT.LANDSCAPE, "landscape"),
+    "L": (WD_ORIENT.LANDSCAPE, "landscape"),
+}
+
+# 页眉页脚变体 -> python-docx Section 上的属性名
+_HEADER_FOOTER_VARIANTS = {
+    "primary": ("header", "footer"),
+    "default": ("header", "footer"),
+    "odd": ("header", "footer"),
+    "first": ("first_page_header", "first_page_footer"),
+    "首页": ("first_page_header", "first_page_footer"),
+    "even": ("even_page_header", "even_page_footer"),
+    "偶页": ("even_page_header", "even_page_footer"),
+}
 
 
 def _to_pt(size) -> float:
@@ -286,6 +338,50 @@ class WordFormatter:
 
 
     @staticmethod
+    def resolve_page_number_format(number_format) -> str | None:
+        """将页码格式参数解析为 OOXML ``w:pgNumType/@w:fmt`` 取值。
+
+        支持 ``"upperRoman"``/``"lowerRoman"``/``"chineseCounting"`` 等 OOXML 原值，
+        也支持中文别名（``"大写罗马"``/``"小写罗马"``/``"中文数字"``/``"带圈数字"``）。
+
+        :param number_format: 页码格式；传 None 时返回 None（表示沿用上一节格式）。
+        """
+        if number_format is None:
+            return None
+        if isinstance(number_format, str):
+            key = number_format.strip()
+            resolved = PAGE_NUMBER_FORMATS.get(
+                key, PAGE_NUMBER_FORMATS.get(key.lower())
+            )
+            if resolved is None:
+                raise ValueError(
+                    f"未知的页码格式: {number_format!r}。可选值: "
+                    + "、".join(sorted(set(PAGE_NUMBER_FORMATS)))
+                )
+            return resolved
+        raise TypeError(f"页码格式类型不支持: {type(number_format).__name__}")
+
+    @staticmethod
+    def resolve_orientation(orientation):
+        """将纸张方向参数解析为 ``(WD_ORIENT 枚举, OOXML 取值)``。
+
+        :param orientation: ``"纵向"``/``"横向"``/``"portrait"``/``"landscape"``/``"P"``/``"L"``。
+        """
+        if orientation is None:
+            return None
+        if isinstance(orientation, WD_ORIENT):
+            ooxml = "landscape" if orientation == WD_ORIENT.LANDSCAPE else "portrait"
+            return orientation, ooxml
+        if isinstance(orientation, str):
+            key = orientation.strip()
+            resolved = ORIENTATION_MAP.get(key, ORIENTATION_MAP.get(key.lower()))
+            if resolved is not None:
+                return resolved
+        raise ValueError(
+            f"未知的纸张方向: {orientation!r}。支持 纵向/横向 或 portrait/landscape。"
+        )
+
+    @staticmethod
     def _append_field_run(paragraph, instruction: str):
         """向段落插入 Word 域（field），如 PAGE / TOC。"""
         begin = OxmlElement("w:fldChar")
@@ -402,7 +498,8 @@ class WordFormatter:
     def _add_heading_with_style(self, heading_text: str, *, level: int, cn_font: str, en_font: str,
                                 size, bold: bool, color: tuple[int, int, int] | None = None,
                                 line_spacing=1, space_before=12, space_after=12,
-                                first_line_indent=28, first_line_indent_chars=2):
+                                first_line_indent=28, first_line_indent_chars=2,
+                                alignment=None):
         self._configure_heading_style(
             level, cn_font=cn_font, en_font=en_font, size=size, bold=bold, color=color,
             line_spacing=line_spacing, space_before=space_before, space_after=space_after,
@@ -413,6 +510,12 @@ class WordFormatter:
         run = heading.add_run(heading_text)
         self.set_run_font(run, cn_font=cn_font, en_font=en_font, size=size,
                                    bold=bold, color=color)
+        # 对齐与段间距只写在段落上而非样式上：同一级的多个标题可能参数不同
+        # （例如居中的封面大标题与居左的正文一级标题），写进样式会互相串味。
+        heading.paragraph_format.space_before = Pt(space_before)
+        heading.paragraph_format.space_after = Pt(space_after)
+        if alignment is not None:
+            heading.alignment = self.resolve_alignment(alignment, strict=True)
         return heading
 
     # ================================================================
@@ -561,6 +664,7 @@ class WordFormatter:
                 font_name: str = "黑体", font_size="三号",
                 bold: bool = False,
                 indent: bool = False, line_spacing=1.5,
+                alignment=None,
                  space_before=None, space_after=None):
         """添加通用标题，默认一级标题格式。
 
@@ -571,6 +675,8 @@ class WordFormatter:
         :param bold: 是否加粗，默认否。
         :param indent: 是否首行缩进 2 字符，默认否。
         :param line_spacing: 行距倍数，默认 1.5。
+        :param alignment: 对齐方式，默认不设置（沿用标题样式的居左）。
+                          传 ``"居中"`` 可做居中的大标题，支持中文、英文、单字母、数字和对齐枚举。
         :param space_before: 段前空白，单位 pt；不传时按字号的 0.5 行计算。
         :param space_after: 段后空白，单位 pt；不传时按字号的 0.5 行计算。
         """
@@ -583,6 +689,7 @@ class WordFormatter:
             space_after=_to_pt(font_size) * 0.5 if space_after is None else space_after,
             first_line_indent=_to_pt(font_size) * 2 if indent else None,
             first_line_indent_chars=2 if indent else None, color=(0, 0, 0),
+            alignment=alignment,
         )
 
     def cover_text(self, text: str, *, font_name: str = "方正小标宋简体",
@@ -727,17 +834,74 @@ class WordFormatter:
     # 3. 图片
     # ================================================================
 
-    def insert_img(self, img_path: str, width: float, *, alignment="居左"):
+    @staticmethod
+    def _image_stream(image):
+        """把路径或 bytes 统一成 ``add_picture`` 能接受的输入。"""
+        if isinstance(image, (bytes, bytearray)):
+            return io.BytesIO(bytes(image)), True
+        if hasattr(image, "read"):
+            return image, False
+        path = Path(image)
+        if not path.is_file():
+            raise FileNotFoundError(f"图片不存在: {path}")
+        return str(path), False
+
+    @staticmethod
+    def _native_width_cm(image) -> float:
+        """按图片自身的 DPI 计算原始宽度，单位 cm。
+
+        扫描件裁剪出来的图通常没有「应该多宽」的先验，按原始像素 / DPI 换算最接近
+        它在源文档里的物理尺寸，比拍一个默认值可靠。
+        """
+        stream = image if hasattr(image, "read") else open(str(image), "rb")
+        try:
+            probe = _DocxImage.from_file(stream)
+        finally:
+            if hasattr(image, "read"):
+                stream.seek(0)
+            else:
+                stream.close()
+        dpi = probe.horz_dpi or 96
+        return probe.px_width / dpi * 2.54
+
+    def insert_img(self, img_path, width=None, *, height=None, alignment="居左",
+                   floating: bool = False, y_offset_pt: float = 0):
         """插入图片。
 
-        :param img_path: 图片文件路径。
-        :param width: 图片宽度，单位 cm。
+        ``width`` 与 ``height`` 都不传时，按图片自身的 DPI 使用原始尺寸，
+        因此 OCR/PDF 裁切出来的图片可以直接落进来，无需先猜一个宽度。
+
+        :param img_path: 图片文件路径（str/Path），或图片的二进制内容（bytes/bytearray）。
+        :param width: 图片宽度，单位 cm，可选。
+        :param height: 图片高度，单位 cm，可选。
         :param alignment: 段落对齐方式，支持中文、英文、单字母、数字和对齐枚举。
+        :param floating: 是否让图片浮于文字上方。印章需要压在落款文字上时用它，
+                         PDF 里裁出的图表、公式也一样。
+        :param y_offset_pt: 浮动图片的垂直偏移，单位 pt，正数上移、负数下移。
         """
+        if width is not None and width <= 0:
+            raise ValueError(f"图片宽度必须大于 0，收到 {width!r}")
+        if height is not None and height <= 0:
+            raise ValueError(f"图片高度必须大于 0，收到 {height!r}")
+
         par = self.doc.add_paragraph("")
         par.alignment = self.resolve_alignment(alignment)
         run = par.add_run()
-        run.add_picture(img_path, width=Cm(width))
+        source, owned = self._image_stream(img_path)
+        try:
+            kwargs = {}
+            if width is not None:
+                kwargs["width"] = Cm(width)
+            if height is not None:
+                kwargs["height"] = Cm(height)
+            if not kwargs:
+                kwargs["width"] = Cm(self._native_width_cm(source))
+            run.add_picture(source, **kwargs)
+        finally:
+            if owned:
+                source.close()
+        if floating:
+            self._make_run_floating(run, y_offset_pt=y_offset_pt)
         return par
 
     # ================================================================
@@ -954,9 +1118,124 @@ class WordFormatter:
                 run.add_break()
         return cell
 
+    @staticmethod
+    def set_table_width(table, width_cm: float):
+        """设置表格总宽度（``w:tblW``）。
+
+        :param table: docx.table.Table 对象。
+        :param width_cm: 表格总宽度，单位 cm。
+        """
+        if width_cm <= 0:
+            raise ValueError(f"表格宽度必须大于 0，收到 {width_cm!r}")
+        tbl_pr = table._tbl.tblPr
+        tbl_w = tbl_pr.find(qn("w:tblW"))
+        if tbl_w is None:
+            tbl_w = OxmlElement("w:tblW")
+            # tblPr 是顺序敏感的：tblW 必须排在 jc / tblBorders 等元素之前
+            anchor = None
+            for tag in ("w:jc", "w:tblCellSpacing", "w:tblInd", "w:tblBorders",
+                        "w:shd", "w:tblLayout", "w:tblCellMar", "w:tblLook"):
+                found = tbl_pr.find(qn(tag))
+                if found is not None:
+                    anchor = found
+                    break
+            if anchor is not None:
+                anchor.addprevious(tbl_w)
+            else:
+                tbl_pr.append(tbl_w)
+        tbl_w.set(qn("w:w"), str(int(round(width_cm * 567))))   # cm -> twips
+        tbl_w.set(qn("w:type"), "dxa")
+        return table
+
+    @staticmethod
+    def _normalize_table_merges(merges, row_count: int, col_count: int):
+        """把合并描述归一成 ``(r1, c1, r2, c2)`` 列表，并校验越界与重叠。
+
+        接受 ``{"row": 0, "col": 0, "rowspan": 2, "colspan": 3}`` 形式的字典，
+        也接受 ``(row, col, rowspan, colspan)`` 形式的元组/列表。
+        """
+        regions = []
+        claimed = {}
+        for item in merges or []:
+            if isinstance(item, dict):
+                row = int(item.get("row", 0))
+                col = int(item.get("col", 0))
+                rowspan = int(item.get("rowspan", 1))
+                colspan = int(item.get("colspan", 1))
+            else:
+                values = list(item)
+                if len(values) < 4:
+                    values = list(values) + [1] * (4 - len(values))
+                row, col, rowspan, colspan = (int(v) for v in values[:4])
+
+            if rowspan < 1 or colspan < 1:
+                raise ValueError(f"合并区域的 rowspan/colspan 必须 >= 1，收到 {item!r}")
+            r2, c2 = row + rowspan - 1, col + colspan - 1
+            if row < 0 or col < 0 or r2 >= row_count or c2 >= col_count:
+                raise ValueError(
+                    f"合并区域 {item!r} 超出表格范围（{row_count} 行 × {col_count} 列）。"
+                )
+            if rowspan == 1 and colspan == 1:
+                continue
+            for r in range(row, r2 + 1):
+                for c in range(col, c2 + 1):
+                    if (r, c) in claimed and claimed[(r, c)] != (row, col):
+                        raise ValueError(
+                            f"合并区域 {item!r} 与 {(claimed[(r, c)][0], claimed[(r, c)][1])} "
+                            f"覆盖了同一个单元格 ({r}, {c})。"
+                        )
+                    claimed[(r, c)] = (row, col)
+            regions.append((row, col, r2, c2))
+        return regions
+
+    @staticmethod
+    def merge_cells(table, merges):
+        """合并表格中指定的单元格区域（对已存在的表格按索引合并）。
+
+        与 :meth:`add_table` 的 ``merges`` 语义一致：**只保留区域左上角单元格的内容**。
+        python-docx 的 ``merge()`` 会把被并单元格的文本拼接进来，这里在合并后把
+        多出来的段落删掉，避免出现「A\\nB\\nC」这种意外结果。
+
+        :param table: docx.table.Table 对象。
+        :param merges: 合并描述列表，如 ``[{"row": 0, "col": 0, "rowspan": 2, "colspan": 3}]``
+                       或 ``[(0, 0, 2, 3)]``。
+        """
+        row_count, col_count = len(table.rows), len(table.columns)
+        regions = WordFormatter._normalize_table_merges(merges, row_count, col_count)
+        for r1, c1, r2, c2 in regions:
+            anchor = table.cell(r1, c1)
+            keep = len(anchor.paragraphs)
+            anchor.merge(table.cell(r2, c2))
+            WordFormatter._strip_extra_paragraphs(table.cell(r1, c1), keep=keep)
+        return table
+
+    @staticmethod
+    def _pick_from_grid(grid, row: int, col: int, default=None):
+        """从二维配置里安全取值；越界或该位置为空时回落到默认值。"""
+        if not grid or row >= len(grid):
+            return default
+        line = grid[row]
+        if line is None or col >= len(line):
+            return default
+        value = line[col]
+        return default if value is None else value
+
+    @staticmethod
+    def _strip_extra_paragraphs(cell, keep: int = 1):
+        """删除单元格中多余的空段落。
+
+        合并单元格时，被并进来的单元格各自带着一个空段落，不清理会让单元格白高一截。
+        """
+        for paragraph in cell.paragraphs[keep:]:
+            paragraph._p.getparent().remove(paragraph._p)
+        return cell
+
     def add_table(self, headers, rows, *, col_widths=None, font_size=12,
                   header_bold: bool = True, alignment="居中",
-                  border_color: str = "000000", border_size: int = 4):
+                  font_name: str = DEFAULT_CN_FONT,
+                  border_color: str = "000000", border_size: int = 4,
+                  merges=None, row_heights=None, table_width_cm=None,
+                  cell_font_names=None):
         """一站式创建带表头的表格。
 
         :param headers: 表头文本列表，如 ["序号", "项目", "金额"]。
@@ -965,31 +1244,68 @@ class WordFormatter:
         :param font_size: 表格字号，支持中文字号字符串。
         :param header_bold: 表头是否加粗，默认是。
         :param alignment: 单元格对齐方式，默认居中，支持中文、英文、单字母、数字和对齐枚举。
+        :param font_name: 单元格中文字体名，默认仿宋_GB2312。
         :param border_color: 边框颜色，6 位十六进制 RGB 字符串。
         :param border_size: 边框粗细，单位 1/8 pt。
+        :param merges: 合并区域列表，如 ``[{"row": 0, "col": 0, "colspan": 4}]``；
+                       合并区域的内容取该区域**左上角**单元格的值。
+        :param row_heights: 每行高度，单位 cm，可选；按「最小值」规则设置，内容多时自动撑高。
+        :param table_width_cm: 表格总宽度，单位 cm，可选。
+        :param cell_font_names: 逐单元格中文字体名的二维列表（含表头那一行），可选；
+                                未覆盖的位置回落到 ``font_name``。
         :return: docx.table.Table 对象
         """
-        table = self.doc.add_table(rows=1 + len(rows), cols=len(headers))
+        row_count = 1 + len(rows)
+        col_count = len(headers)
+        table = self.doc.add_table(rows=row_count, cols=col_count)
         table.alignment = WD_TABLE_ALIGNMENT.CENTER
         self.set_table_borders(table, color=border_color, size=border_size)
+        if table_width_cm is not None:
+            self.set_table_width(table, table_width_cm)
 
-        for i, h in enumerate(headers):
-            self.set_cell(
-                table.rows[0].cells[i], h,
-                font_size=font_size, bold=header_bold, alignment=alignment,
-            )
+        regions = self._normalize_table_merges(merges, row_count, col_count)
 
-        for r_idx, row in enumerate(rows, start=1):
-            for c_idx, val in enumerate(row):
-                self.set_cell(
-                    table.rows[r_idx].cells[c_idx], str(val),
-                    font_size=font_size, alignment=alignment,
-                )
-
+        # 列宽必须在合并之前按完整网格写：合并后再写会把 tcW 落到跨列单元格上，列宽失真
         if col_widths:
             for r in table.rows:
                 for i, w in enumerate(col_widths):
                     r.cells[i].width = Cm(w)
+
+        # 先合并再填内容：反过来会被 python-docx 把被并单元格的文本一并拼接进合并格
+        for r1, c1, r2, c2 in regions:
+            table.cell(r1, c1).merge(table.cell(r2, c2))
+
+        covered = set()
+        for r1, c1, r2, c2 in regions:
+            for r in range(r1, r2 + 1):
+                for c in range(c1, c2 + 1):
+                    if (r, c) != (r1, c1):
+                        covered.add((r, c))
+
+        def write(row: int, col: int, value, bold: bool):
+            if (row, col) in covered:
+                return
+            cell = table.cell(row, col)
+            self.set_cell(
+                cell, str(value),
+                font_name=self._pick_from_grid(cell_font_names, row, col, font_name),
+                font_size=font_size, bold=bold, alignment=alignment,
+            )
+            if (row, col) in {(r1, c1) for r1, c1, _, _ in regions}:
+                self._strip_extra_paragraphs(cell)
+
+        for index, header in enumerate(headers):
+            write(0, index, header, header_bold)
+        for r_idx, row in enumerate(rows, start=1):
+            for c_idx, value in enumerate(row):
+                write(r_idx, c_idx, value, False)
+
+        if row_heights:
+            for row, height in zip(table.rows, row_heights):
+                if height is None:
+                    continue
+                row.height = Cm(height)
+                row.height_rule = WD_ROW_HEIGHT_RULE.AT_LEAST
         return table
 
     # ================================================================
@@ -997,7 +1313,93 @@ class WordFormatter:
     # ================================================================
 
     @staticmethod
-    def set_header(section, text: str, *, alignment="居中",
+    def _text_width_cm(section) -> float:
+        """版心宽度（页面宽 - 左右页边距），单位 cm。"""
+        return (
+            section.page_width.cm - section.left_margin.cm - section.right_margin.cm
+        )
+
+    @staticmethod
+    def header_footer_part(section, *, target: str = "header", variant: str = "primary"):
+        """取某一节的页眉/页脚部件。
+
+        :param section: 目标节。
+        :param target: ``"header"`` 或 ``"footer"``。
+        :param variant: ``"primary"``（默认/奇数页）、``"first"``（首页）、``"even"``（偶数页），
+                        也接受 ``"首页"``/``"偶页"``。
+        """
+        if target not in ("header", "footer"):
+            raise ValueError(f"target 只能是 header/footer，收到 {target!r}")
+        keys = _HEADER_FOOTER_VARIANTS.get(str(variant).strip().lower())
+        if keys is None:
+            raise ValueError(
+                f"未知的页眉页脚变体: {variant!r}。支持 primary/first/even 或 首页/偶页。"
+            )
+        return getattr(section, keys[0] if target == "header" else keys[1])
+
+    @staticmethod
+    def set_different_first_page(section, enabled: bool = True):
+        """设置本节首页是否使用独立的页眉页脚（``w:titlePg``）。
+
+        :param section: 目标节。
+        :param enabled: True 时首页可用 ``variant="first"`` 单独设置页眉页脚。
+        """
+        section.different_first_page_header_footer = bool(enabled)
+        return section
+
+    def set_different_odd_even(self, enabled: bool = True):
+        """设置全文奇偶页是否使用不同的页眉页脚（文档级 ``w:evenAndOddHeaders``）。
+
+        :param enabled: True 时``variant="even"`` 的页眉页脚才会生效。
+        """
+        settings = self.doc.settings.element
+        existing = settings.find(qn("w:evenAndOddHeaders"))
+        if not enabled:
+            if existing is not None:
+                settings.remove(existing)
+            return self.doc
+
+        if existing is None:
+            existing = OxmlElement("w:evenAndOddHeaders")
+            # settings.xml 是顺序敏感的 CT_Settings，插在 compat/rsids 之前才合法
+            anchor = None
+            for tag in ("w:compat", "w:rsids", "w:updateFields", "w:themeFontLang"):
+                found = settings.find(qn(tag))
+                if found is not None:
+                    anchor = found
+                    break
+            if anchor is not None:
+                anchor.addprevious(existing)
+            else:
+                settings.append(existing)
+        existing.set(qn("w:val"), "true")
+        return self.doc
+
+    @staticmethod
+    def _add_text_with_tabs(paragraph, text: str, *, font_name: str, font_size,
+                            bold: bool = False):
+        """把 ``\\t`` 分隔的文本写入段落，制表符落成真正的 ``<w:tab/>``。
+
+        python-docx 的 ``add_run("a\\tb")`` 会把制表符写进 ``<w:t>``，Word 不把它当
+        制表位处理，因此必须显式插入 ``w:tab`` 元素。
+        """
+        runs = []
+        for index, segment in enumerate(str(text).split("\t")):
+            if index:
+                tab_run = paragraph.add_run()
+                tab_run._r.append(OxmlElement("w:tab"))
+                runs.append(tab_run)
+            if segment:
+                run = paragraph.add_run(segment)
+                WordFormatter.set_run_font(
+                    run, cn_font=font_name, en_font=DEFAULT_EN_FONT,
+                    size=font_size, bold=bold, color=(0, 0, 0),
+                )
+                runs.append(run)
+        return runs
+
+    @staticmethod
+    def set_header(section, text: str, *, variant: str = "primary", alignment="居中",
                    font_name: str = DEFAULT_HEADER_FOOTER_FONT,
                    font_size=DEFAULT_HEADER_FOOTER_SIZE,
                    bottom_border: bool = True, line_length=None,
@@ -1005,19 +1407,21 @@ class WordFormatter:
         """设置指定节的页眉文本（默认楷体小五号）。
 
         :param section: 目标节。
-        :param text: 页眉文本。
+        :param text: 页眉文本；含 ``\\t`` 时按制表位分列（配合 set_header_parts 使用）。
+        :param variant: ``primary``（默认/奇数页）、``first``（首页）、``even``（偶数页）。
         :param alignment: 对齐方式，默认居中，支持中文、英文、单字母、数字和对齐枚举。
         :param font_name: 字体名称。
         :param font_size: 字号，支持中文字号字符串。
         """
         return WordFormatter._fill_header_footer_part(
-            section.header, text, alignment, font_name, font_size,
+            WordFormatter.header_footer_part(section, target="header", variant=variant),
+            text, alignment, font_name, font_size,
             bottom_border=bottom_border, section=section,
             line_length=line_length, line_alignment=line_alignment,
         )
 
     @staticmethod
-    def set_footer(section, text: str, *, alignment="居中",
+    def set_footer(section, text: str, *, variant: str = "primary", alignment="居中",
                    font_name: str = DEFAULT_HEADER_FOOTER_FONT,
                    font_size=DEFAULT_HEADER_FOOTER_SIZE,
                    bottom_border: bool = False, top_border: bool = True,
@@ -1026,21 +1430,87 @@ class WordFormatter:
         """设置指定节的页脚文本（默认楷体小五号）。
 
         :param section: 目标节。
-        :param text: 页脚文本。
+        :param text: 页脚文本。已有的页码域会被保留。
+        :param variant: ``primary``（默认/奇数页）、``first``（首页）、``even``（偶数页）。
         :param alignment: 对齐方式，默认居中，支持中文、英文、单字母、数字和对齐枚举。
         :param font_name: 字体名称。
         :param font_size: 字号，支持中文字号字符串。
         :note: 页码请使用 add_footer_page_number 或 set_page_number_from_section。
         """
         return WordFormatter._fill_header_footer_part(
-            section.footer, text, alignment, font_name, font_size,
+            WordFormatter.header_footer_part(section, target="footer", variant=variant),
+            text, alignment, font_name, font_size,
             bottom_border=bottom_border, section=section,
             line_length=line_length, line_alignment=line_alignment,
             top_border=top_border, separate_page_number=True,
         )
 
     @staticmethod
-    def set_header_image(section, image_path, *, width: float | None = None,
+    def set_header_parts(section, *, left: str = "", center: str = "", right: str = "",
+                         variant: str = "primary",
+                         font_name: str = DEFAULT_HEADER_FOOTER_FONT,
+                         font_size=DEFAULT_HEADER_FOOTER_SIZE,
+                         bottom_border: bool = True, line_length=None,
+                         line_alignment: str = "居左"):
+        """在一行内分左、中、右三段设置页眉（中文报告最常见的页眉形式）。
+
+        用制表位实现：左段贴版心左边界、中段居中、右段贴版心右边界，
+        因此「文档名 + 页码」「公司名 + 报告名」这类页眉无需手工数空格。
+
+        :param section: 目标节。
+        :param left: 左段文本。
+        :param center: 中段文本。
+        :param right: 右段文本。
+        :param variant: ``primary``（默认/奇数页）、``first``（首页）、``even``（偶数页）。
+        :param font_name: 字体名称。
+        :param font_size: 字号，支持中文字号字符串。
+        :param bottom_border: 是否给页眉段落加下横线。
+        :param line_length: 横线长度，单位 cm；省略时使用页面可用宽度。
+        :param line_alignment: 横线对齐方式。
+        """
+        part = WordFormatter.set_header(
+            section, "\t".join([left, center, right]), variant=variant,
+            alignment="居左", font_name=font_name, font_size=font_size,
+            bottom_border=bottom_border, line_length=line_length,
+            line_alignment=line_alignment,
+        )
+        WordFormatter._apply_tri_section_tab_stops(part, section)
+        return part
+
+    @staticmethod
+    def set_footer_parts(section, *, left: str = "", center: str = "", right: str = "",
+                         variant: str = "primary",
+                         font_name: str = DEFAULT_HEADER_FOOTER_FONT,
+                         font_size=DEFAULT_HEADER_FOOTER_SIZE,
+                         top_border: bool = True, line_length=None,
+                         line_alignment: str = "居左"):
+        """在一行内分左、中、右三段设置页脚；参数含义同 :meth:`set_header_parts`。
+
+        :param top_border: 是否给页脚段落加上横线。
+        """
+        part = WordFormatter.set_footer(
+            section, "\t".join([left, center, right]), variant=variant,
+            alignment="居左", font_name=font_name, font_size=font_size,
+            top_border=top_border, line_length=line_length,
+            line_alignment=line_alignment,
+        )
+        WordFormatter._apply_tri_section_tab_stops(part, section)
+        return part
+
+    @staticmethod
+    def _apply_tri_section_tab_stops(part, section):
+        """给页眉/页脚首段设置「居中 + 居右」两个制表位，实现三段分列。"""
+        paragraph = part.paragraphs[0]
+        stops = paragraph.paragraph_format.tab_stops
+        stops.clear_all()
+        width = WordFormatter._text_width_cm(section)
+        stops.add_tab_stop(Cm(width / 2), WD_TAB_ALIGNMENT.CENTER)
+        stops.add_tab_stop(Cm(width), WD_TAB_ALIGNMENT.RIGHT)
+        return paragraph
+
+    @staticmethod
+    def set_header_image(section, image_path, *, variant: str = "primary",
+                         width: float | None = None,
                          height: float | None = None, alignment="居中",
                          floating: bool = True, bottom_border: bool = True,
                          line_length=None, line_alignment="居左",
@@ -1049,12 +1519,14 @@ class WordFormatter:
 
         :param section: 目标节。
         :param image_path: 图片路径，必须存在。
+        :param variant: ``primary``（默认/奇数页）、``first``（首页）、``even``（偶数页）。
         :param width: 图片宽度，单位 cm，可选。
         :param height: 图片高度，单位 cm，可选；width 和 height 至少传一个。
         :param alignment: 对齐方式，默认居中，支持中文、英文、单字母、数字和对齐枚举。
         """
         return WordFormatter._set_header_footer_image(
-            section.header, image_path, width=width, height=height,
+            WordFormatter.header_footer_part(section, target="header", variant=variant),
+            image_path, width=width, height=height,
             alignment=alignment, floating=floating,
             bottom_border=bottom_border, section=section,
             line_length=line_length, line_alignment=line_alignment,
@@ -1062,7 +1534,8 @@ class WordFormatter:
         )
 
     @staticmethod
-    def set_footer_image(section, image_path, *, width: float | None = None,
+    def set_footer_image(section, image_path, *, variant: str = "primary",
+                         width: float | None = None,
                          height: float | None = None, alignment="居中",
                          floating: bool = True, bottom_border: bool = True,
                          line_length=None, line_alignment="居左",
@@ -1071,12 +1544,14 @@ class WordFormatter:
 
         :param section: 目标节。
         :param image_path: 图片路径，必须存在。
+        :param variant: ``primary``（默认/奇数页）、``first``（首页）、``even``（偶数页）。
         :param width: 图片宽度，单位 cm，可选。
         :param height: 图片高度，单位 cm，可选；width 和 height 至少传一个。
         :param alignment: 对齐方式，默认居中，支持中文、英文、单字母、数字和对齐枚举。
         """
         return WordFormatter._set_header_footer_image(
-            section.footer, image_path, width=width, height=height,
+            WordFormatter.header_footer_part(section, target="footer", variant=variant),
+            image_path, width=width, height=height,
             alignment=alignment, floating=floating,
             bottom_border=bottom_border, section=section,
             line_length=line_length, line_alignment=line_alignment,
@@ -1149,10 +1624,8 @@ class WordFormatter:
         paragraph.paragraph_format.space_before = Pt(0)
         paragraph.paragraph_format.space_after = Pt(0)
         if text:
-            run = paragraph.add_run(text)
-            WordFormatter.set_run_font(
-                run, cn_font=font_name, en_font=DEFAULT_EN_FONT,
-                size=font_size, bold=False, color=(0, 0, 0),
+            written_runs = WordFormatter._add_text_with_tabs(
+                paragraph, text, font_name=font_name, font_size=font_size,
             )
             # 页码已经存在时，把新文字放到 PAGE 域之前。
             field_run = next(
@@ -1160,9 +1633,11 @@ class WordFormatter:
                 None,
             )
             if field_run is not None:
-                paragraph._p.remove(run._r)
+                for written in written_runs:
+                    paragraph._p.remove(written._r)
                 field_index = list(paragraph._p).index(field_run._r)
-                paragraph._p.insert(field_index, run._r)
+                for offset, written in enumerate(written_runs):
+                    paragraph._p.insert(field_index + offset, written._r)
         if bottom_border:
             WordFormatter._set_bottom_border(
                 paragraph, section=section, line_length=line_length,
@@ -1294,25 +1769,29 @@ class WordFormatter:
         drawing.getparent().replace(drawing, pict)
 
     @staticmethod
-    def clear_footer(section):
+    def clear_footer(section, *, variant: str = "primary"):
         """清空指定节的页脚内容。
 
         :param section: 目标节。
+        :param variant: ``primary``（默认/奇数页）、``first``（首页）、``even``（偶数页）。
         """
-        section.footer.is_linked_to_previous = False
-        for paragraph in section.footer.paragraphs:
+        part = WordFormatter.header_footer_part(section, target="footer", variant=variant)
+        part.is_linked_to_previous = False
+        for paragraph in part.paragraphs:
             for run in list(paragraph.runs):
                 run._r.getparent().remove(run._r)
         return section
 
     @staticmethod
-    def clear_header(section):
+    def clear_header(section, *, variant: str = "primary"):
         """清空指定节的页眉内容。
 
         :param section: 目标节。
+        :param variant: ``primary``（默认/奇数页）、``first``（首页）、``even``（偶数页）。
         """
-        section.header.is_linked_to_previous = False
-        for paragraph in section.header.paragraphs:
+        part = WordFormatter.header_footer_part(section, target="header", variant=variant)
+        part.is_linked_to_previous = False
+        for paragraph in part.paragraphs:
             for run in list(paragraph.runs):
                 run._r.getparent().remove(run._r)
         return section
@@ -1331,7 +1810,12 @@ class WordFormatter:
                        total_pages_separator: str = " / ",
                        prefix: str = "", suffix: str = "",
                        alignment="居中", font_name: str | None = None,
-                       font_size=None):
+                       font_size=None, number_format=None,
+                       orientation=None, page_width: float | None = None,
+                       page_height: float | None = None,
+                       top: float | None = None, bottom: float | None = None,
+                       left: float | None = None, right: float | None = None,
+                       gutter: float | None = None):
         """插入新节。
 
         默认不添加页码；``add_page_number=True`` 时默认跟随上一节。
@@ -1348,6 +1832,12 @@ class WordFormatter:
         :param alignment: 页码对齐方式，默认居中，支持中文、英文、单字母、数字和对齐枚举。
         :param font_name: 页码字体名称。
         :param font_size: 页码字号，支持中文字号字符串。
+        :param number_format: 页码编号格式，如 ``"upperRoman"``/``"大写罗马"``；省略时沿用原格式。
+        :param orientation: 本节纸张方向，``"纵向"``/``"横向"``；与上一节不同时自动交换宽高。
+        :param page_width/page_height: 本节纸张宽度/高度，单位 cm，可选。
+        :param top/bottom/left/right: 本节页边距，单位 cm；只设置传入的项，
+                                      未传的项沿用 python-docx 新建节的默认值。
+        :param gutter: 本节装订线宽度，单位 cm，可选。
         """
         # 上一段已经分页时，再使用 NEW_PAGE 会叠加两次换页，产生空白页。
         # 改用连续分节，既保留上一段的分页效果，又能创建新的节。
@@ -1364,12 +1854,23 @@ class WordFormatter:
         else:
             self.clear_header(section)
 
+        # 纸张方向/尺寸/边距必须按节设置：报告里横向插页与纵向正文混排是常态
+        if any(value is not None for value in (
+            orientation, page_width, page_height, top, bottom, left, right, gutter,
+        )):
+            self.set_section_page(
+                section, orientation=orientation, page_width=page_width,
+                page_height=page_height, top=top, bottom=bottom, left=left,
+                right=right, gutter=gutter,
+            )
+
         if add_page_number:
             if restart_page_number:
                 self.restart_page_numbering(
                     section, start=start_page_number, add_footer_number=True,
                     prefix=prefix, suffix=suffix, alignment=alignment,
                     font_name=font_name, font_size=font_size,
+                    number_format=number_format,
                     show_total_pages=show_total_pages,
                     total_pages_separator=total_pages_separator,
                 )
@@ -1387,21 +1888,118 @@ class WordFormatter:
             section.footer.is_linked_to_previous = True
         else:
             self.clear_footer(section)
+
+        if number_format is not None and not restart_page_number:
+            WordFormatter.set_page_number_format(section, number_format)
         return section
 
     @staticmethod
-    def set_page_number_start(section, start: int = 1):
-        """设置指定节页码起始值。
+    def set_page_number_start(section, start: int = 1, *, number_format=None):
+        """设置指定节页码起始值与编号格式。
 
         :param section: 目标节。
         :param start: 起始页码。
+        :param number_format: 编号格式，如 ``"upperRoman"``/``"大写罗马"``、
+                              ``"lowerRoman"``/``"小写罗马"``、``"chineseCounting"``；
+                              省略时保留原有格式。
         """
+        fmt = WordFormatter.resolve_page_number_format(number_format)
         sect_pr = section._sectPr
         pg_num_type = sect_pr.find(qn("w:pgNumType"))
         if pg_num_type is None:
             pg_num_type = OxmlElement("w:pgNumType")
             sect_pr.append(pg_num_type)
         pg_num_type.set(qn("w:start"), str(start))
+        if fmt is not None:
+            pg_num_type.set(qn("w:fmt"), fmt)
+        return section
+
+    @staticmethod
+    def set_page_number_format(section, number_format, *, start: int | None = None):
+        """设置某节的页码编号格式（可选同时改起始页码）。
+
+        :param section: 目标节。
+        :param number_format: 编号格式，支持 ``upperRoman``/``lowerRoman``/
+                              ``chineseCounting``/``decimal``/``decimalEnclosedCircle`` 等，
+                              也接受 ``大写罗马``/``小写罗马``/``中文数字``/``带圈数字``。
+        :param start: 同时指定起始页码，可选；省略时保留原有起始值。
+        """
+        fmt = WordFormatter.resolve_page_number_format(number_format)
+        if fmt is None:
+            raise ValueError("number_format 不能为空")
+        sect_pr = section._sectPr
+        pg_num_type = sect_pr.find(qn("w:pgNumType"))
+        if pg_num_type is None:
+            pg_num_type = OxmlElement("w:pgNumType")
+            sect_pr.append(pg_num_type)
+        pg_num_type.set(qn("w:fmt"), fmt)
+        if start is not None:
+            pg_num_type.set(qn("w:start"), str(start))
+        return section
+
+    def set_section_page(self, section, *, orientation=None,
+                         page_width: float | None = None,
+                         page_height: float | None = None,
+                         top: float | None = None, bottom: float | None = None,
+                         left: float | None = None, right: float | None = None,
+                         gutter: float | None = None,
+                         horizontal_alignment=None):
+        """单独设置某一节的纸张方向、尺寸与页边距。
+
+        报告里横向插页（宽表格、图纸）与纵向正文混排时，必须按节设置，
+        :meth:`set_page_margins` 只适合全文统一边距的场景。
+
+        :param section: 目标节。
+        :param orientation: ``"纵向"``/``"横向"`` 或 ``portrait``/``landscape``；
+                            与当前方向不同时会自动交换宽高。
+        :param page_width: 页面宽度，单位 cm，可选。
+        :param page_height: 页面高度，单位 cm，可选。
+        :param top/bottom/left/right: 页边距，单位 cm，只设置传入的项。
+        :param gutter: 装订线宽度，单位 cm，可选。
+        :param horizontal_alignment: 页面水平对齐，支持 L/C/R 或 左对齐/居中/右对齐。
+        """
+        resolved = WordFormatter.resolve_orientation(orientation)
+        width_cm = page_width
+        height_cm = page_height
+
+        if resolved is not None:
+            target_orient, ooxml_orient = resolved
+            current_is_landscape = section.page_width > section.page_height
+            target_is_landscape = target_orient == WD_ORIENT.LANDSCAPE
+            available = section.page_width.cm, section.page_height.cm
+            if width_cm is None and height_cm is None and \
+                    current_is_landscape != target_is_landscape:
+                width_cm, height_cm = available[1], available[0]
+            section.orientation = target_orient
+            sect_pr = section._sectPr
+            pg_sz = sect_pr.find(qn("w:pgSz"))
+            if pg_sz is not None:
+                pg_sz.set(qn("w:orient"), ooxml_orient)
+
+        if width_cm is not None:
+            section.page_width = Cm(width_cm)
+        if height_cm is not None:
+            section.page_height = Cm(height_cm)
+
+        if top is not None:
+            section.top_margin = Cm(top)
+        if bottom is not None:
+            section.bottom_margin = Cm(bottom)
+        if left is not None:
+            section.left_margin = Cm(left)
+        if right is not None:
+            section.right_margin = Cm(right)
+        if gutter is not None:
+            section.gutter = Cm(gutter)
+
+        if horizontal_alignment is not None:
+            jc_value = self.resolve_page_justification(horizontal_alignment)
+            sect_pr = section._sectPr
+            jc = sect_pr.find(qn("w:jc"))
+            if jc is None:
+                jc = OxmlElement("w:jc")
+                sect_pr.append(jc)
+            jc.set(qn("w:val"), jc_value)
         return section
 
     @staticmethod
@@ -1476,6 +2074,7 @@ class WordFormatter:
     def restart_page_numbering(section, *, start: int = 1, add_footer_number: bool = True,
                                prefix: str = "", suffix: str = "", alignment="居中",
                                font_name: str | None = None, font_size=None,
+                               number_format=None,
                                show_total_pages: bool = False,
                                total_pages_separator: str = " / "):
         """重启指定节的页码编号。
@@ -1488,10 +2087,14 @@ class WordFormatter:
         :param alignment: 对齐方式，默认居中，支持中文、英文、单字母、数字和对齐枚举。
         :param font_name: 页码字体名称。
         :param font_size: 页码字号，支持中文字号字符串。
+        :param number_format: 页码编号格式，如 ``"upperRoman"``/``"大写罗马"``、
+                              ``"chineseCounting"``；省略时沿用原有格式。
         """
         section.header.is_linked_to_previous = False
         section.footer.is_linked_to_previous = False
-        WordFormatter.set_page_number_start(section, start=start)
+        WordFormatter.set_page_number_start(
+            section, start=start, number_format=number_format,
+        )
         if add_footer_number:
             WordFormatter.add_footer_page_number(
                 section, prefix=prefix, suffix=suffix, alignment=alignment,
@@ -1506,7 +2109,7 @@ class WordFormatter:
                                            add_footer_number: bool = True,
                                            prefix: str = "", suffix: str = "",
                                            alignment="居中", font_name: str | None = None,
-                                           font_size=None):
+                                           font_size=None, number_format=None):
         """插入新节并设置页码；默认从指定数字重新开始。
 
         :param start_type: 分节方式，默认 NEW_PAGE。
@@ -1516,18 +2119,19 @@ class WordFormatter:
         :param alignment: 页码对齐方式，支持中文、英文、单字母、数字和对齐枚举。
         :param font_name: 页码字体名称。
         :param font_size: 页码字号，支持中文字号字符串。
+        :param number_format: 页码编号格式，如 ``"upperRoman"``/``"大写罗马"``。
         """
         return self.insert_section(
             start_type=start_type, add_page_number=add_footer_number,
             restart_page_number=True, start_page_number=start_page_number,
             prefix=prefix, suffix=suffix, alignment=alignment,
-            font_name=font_name, font_size=font_size,
+            font_name=font_name, font_size=font_size, number_format=number_format,
         )
 
     def set_page_number_from_section(self, start_section_idx: int, *, start: int = 1,
                                     prefix: str = "", suffix: str = "",
                                     alignment="居中", font_name: str | None = None,
-                                    font_size=None):
+                                    font_size=None, number_format=None):
         """从指定节开始设置页码（包含此节），之前的节无页码。
 
         一次性完成：
@@ -1541,6 +2145,8 @@ class WordFormatter:
         :param alignment: 页码对齐方式，支持中文、英文、单字母、数字和对齐枚举。
         :param font_name: 页码字体名称。
         :param font_size: 页码字号，支持中文字号字符串。
+        :param number_format: 页码编号格式，如 ``"upperRoman"``/``"大写罗马"``；
+                              封面/目录与正文用不同编号体系时用它区分。
         """
         sections = self.doc.sections
         total = len(sections)
@@ -1556,7 +2162,7 @@ class WordFormatter:
         self.restart_page_numbering(
             sections[start_section_idx], start=start, add_footer_number=True,
             prefix=prefix, suffix=suffix, alignment=alignment,
-            font_name=font_name, font_size=font_size,
+            font_name=font_name, font_size=font_size, number_format=number_format,
         )
 
         for i in range(start_section_idx + 1, total):

@@ -117,15 +117,34 @@ doc.save("demo.docx")
 
 | 方法 | 用途 |
 |------|------|
-| `body(text, *, font_name, font_size, indent, bold, highlight, alignment, line_spacing, ...)` | 正文段落；默认字符缩进优先、pt 缩进兜底 |
+| `body(text, *, font_name, font_size, indent, bold, highlight, alignment, line_spacing, space_before, space_after)` | 正文段落；默认字符缩进优先、pt 缩进兜底 |
 | `blank_lines(count)` | 批量添加空行 |
-| `heading(text, *, level, font_name, font_size, bold, indent, ...)` | 通用标题（默认一级标题格式） |
-| `cover_text(text, *, font_name, font_size, bold, alignment, indent, ...)` | 封面文本（默认居中） |
+| `heading(text, *, level, font_name, font_size, bold, indent, alignment, line_spacing, space_before, space_after)` | 通用标题（默认一级标题格式）；`alignment` 可做居中大标题 |
+| `cover_text(text, *, font_name, font_size, bold, alignment, indent, line_spacing, ...)` | 封面文本（默认居中） |
 | `right_text(text, *, font_name, font_size, indent)` | 右对齐段落（公司名/日期） |
 | `created_time(value, *, font_name, font_size, bold)` | 数字日期文本，默认右对齐 |
 | `chinese_date(value, *, font_name, font_size, bold, alignment)` | 中文完整日期，默认居中 |
 | `chinese_year_month(value, *, font_name, font_size, bold, alignment)` | 中文年月，默认居中 |
-| `insert_img(img_path, width, *, alignment)` | 插入图片（width 单位 cm） |
+| `insert_img(image, width=None, *, height=None, alignment, floating, y_offset_pt)` | 插入图片；可传路径或 `bytes`，宽高都省略时按图片自身 DPI 使用原始尺寸 |
+
+`heading()` 的 `alignment` / `space_before` / `space_after` 写在**段落**上而不是标题样式上，
+因此同级的居中标题与居左标题不会互相串味。
+
+`insert_img()` 的自动尺寸便于把 PDF/扫描件裁切出来的图片直接落进文档，不需要先量一个宽度：
+
+```python
+formatter.insert_img(cropped_bytes)              # 按原图 DPI 自动定宽
+formatter.insert_img("scan.png", width=15)       # 指定宽度，高度等比
+formatter.insert_img("scan.png", height=8)       # 指定高度，宽度等比
+```
+
+`floating=True` 让图片浮于文字上方，用于**印章压落款**、以及 PDF 里裁出来的图表与公式：
+
+```python
+formatter.body("落款：某某公司")
+formatter.insert_img("seal.png", 3.5, alignment="居右", floating=True, y_offset_pt=6)
+# 印章浮在落款文字之上，不会被排版推着走
+```
 
 `body(indent=True)` 会同时写入字符单位和绝对长度单位：
 
@@ -174,55 +193,131 @@ formatter.qianfaye(
 
 | 方法 | 用途 |
 |------|------|
-| `add_table(headers, rows, *, col_widths, font_size, header_bold, alignment, border_color, border_size)` | 一站式创建带表头表格 |
+| `add_table(headers, rows, *, col_widths, font_size, font_name, header_bold, alignment, border_color, border_size, merges, row_heights, table_width_cm, cell_font_names)` | 一站式创建带表头表格；支持合并单元格、行高、总宽、逐格字体 |
+| `merge_cells(table, merges)` | 对已存在的表格合并单元格（只保留区域左上角内容） |
 | `set_cell(cell, text, *, font_name, font_size, bold, alignment, line_spacing)` | 设置单元格格式（支持加粗/对齐） |
 | `set_table_borders(table, *, color, size)` | 为表格添加边框 |
+| `set_table_width(table, width_cm)` | 设置表格总宽度 |
 
 ```python
 formatter.add_table(
-    headers=["序号", "项目", "金额"],
-    rows=[["1", "建安费", "1200"], ["2", "设备费", "850"]],
-    col_widths=[2, 5, 3],          # cm
+    headers=["序号", "项目", "金额", "备注"],
+    rows=[["1", "建安费", "1200", "跨两列"], ["2", "设备费", "850", "—"]],
+    col_widths=[2, 5, 3, 4],          # cm
     header_bold=True,
     alignment="居中",
+    merges=[{"row": 1, "col": 2, "rowspan": 1, "colspan": 2}],
+    row_heights=[1.0, 1.2, 1.2],      # cm，按「最小值」规则
+    table_width_cm=14,
+    cell_font_names=[["黑体", "黑体", "黑体", "黑体"]],   # 表头用黑体，其余回落 font_name
 )
+```
+
+**合并单元格约定**：`headers` / `rows` 始终按**完整网格**给出，`merges` 描述哪些矩形区域合并；
+合并区域的内容取**左上角**单元格的值，被覆盖位置的值会被忽略。索引从 0 开始，
+`rowspan` / `colspan` 至少为 1，越界或互相重叠会直接抛 `ValueError`。
+
+```python
+# 等价写法：tuples 也接受
+merges=[(1, 2, 1, 2)]        # (row, col, rowspan, colspan)
 ```
 
 ### 页眉页脚
 
 | 方法 | 用途 |
 |------|------|
-| `set_header(section, text, *, alignment, font_name, font_size)` | 设置节页眉（默认楷体小五号） |
-| `set_footer(section, text, *, alignment, font_name, font_size)` | 设置节页脚（默认楷体小五号） |
-| `clear_header(section)` / `clear_footer(section)` | 清空节页眉/页脚 |
-| `set_header_image(section, image_path, *, width, height, alignment, floating, bottom_border, y_offset_pt)` | 设置页眉图片；可浮于文字上方并调整垂直位置 |
-| `set_footer_image(section, image_path, *, width, height, alignment, floating, bottom_border, y_offset_pt)` | 设置页脚图片；可浮于文字上方并调整垂直位置 |
+| `set_header(section, text, *, variant, alignment, font_name, font_size)` | 设置节页眉（默认楷体小五号） |
+| `set_footer(section, text, *, variant, alignment, font_name, font_size)` | 设置节页脚（默认楷体小五号） |
+| `set_header_parts(section, *, left, center, right, variant, ...)` | **三段页眉**：左中右分列，用制表位实现 |
+| `set_footer_parts(section, *, left, center, right, variant, ...)` | 三段页脚 |
+| `set_different_first_page(section, enabled)` | 本节首页使用独立页眉页脚（`w:titlePg`） |
+| `set_different_odd_even(enabled)` | 全文奇偶页使用不同页眉页脚（文档级 `w:evenAndOddHeaders`） |
+| `header_footer_part(section, *, target, variant)` | 取指定节/变体的页眉页脚部件 |
+| `clear_header(section, *, variant)` / `clear_footer(section, *, variant)` | 清空节页眉/页脚 |
+| `set_header_image(section, image_path, *, variant, width, height, alignment, floating, bottom_border, y_offset_pt)` | 设置页眉图片；可浮于文字上方并调整垂直位置 |
+| `set_footer_image(section, image_path, *, variant, width, height, alignment, floating, bottom_border, y_offset_pt)` | 设置页脚图片；可浮于文字上方并调整垂直位置 |
+
+`variant` 取 `primary`（默认/奇数页）、`first`（首页）、`even`（偶数页）。
+用 `first` 之前需先打开 `set_different_first_page`；用 `even` 之前需先打开文档级的
+`set_different_odd_even`，否则 Word 不会读取对应的页眉页脚部件。
 
 ```python
-WordFormatter.set_header(doc.sections[1], "项目名称 报告名称", alignment="居中")
-WordFormatter.set_footer(doc.sections[1], "编制单位名称", alignment="居右")
-WordFormatter.set_header_image(doc.sections[1], "logo.png", width=3)
+formatter = WordFormatter(doc)
+sec = doc.sections[1]
+
+# 三段页眉：公司名贴左、报告名居中、页码贴右
+formatter.set_header_parts(sec, left="某某公司", center="结算审核报告", right="第 1 页")
+
+# 封面页不要页眉页脚
+formatter.set_different_first_page(doc.sections[0], True)
+formatter.set_header(doc.sections[0], "", variant="first")
+
+# 奇偶页不同（书刊式装订）
+formatter.set_different_odd_even(True)
+formatter.set_header(sec, "奇数页页眉")
+formatter.set_header(sec, "偶数页页眉", variant="even")
+
+WordFormatter.set_header_image(sec, "logo.png", width=3)
 ```
+
+> 注意：`set_different_odd_even(True)` 是**文档级**开关。一旦打开，没有单独设置
+> 偶页页眉的节会显示为空页眉。
 
 ### 节与页码
 
 | 方法 | 用途 |
 |------|------|
-| `insert_section(start_type, *, add_page_number, restart_page_number, inherit_header, inherit_footer)` | 插入新节并控制页眉页脚继承 |
-| `set_page_number_start(section, start)` | 设置节页码起始值 |
+| `insert_section(start_type, *, add_page_number, restart_page_number, inherit_header, inherit_footer, number_format, orientation, page_width, page_height, top, bottom, left, right, gutter)` | 插入新节；可同时设定纸张方向/尺寸/边距 |
+| `set_section_page(section, *, orientation, page_width, page_height, top, bottom, left, right, gutter, horizontal_alignment)` | **按节**设置纸张方向/尺寸/页边距 |
+| `set_page_number_start(section, start, *, number_format)` | 设置节页码起始值与编号格式 |
+| `set_page_number_format(section, number_format, *, start)` | 只设置节页码编号格式 |
 | `add_page_number(paragraph, *, prefix, suffix, alignment, font_name, font_size)` | 向段落添加 PAGE 域 |
 | `add_footer_page_number(section, *, prefix, suffix, ...)` | 节页脚添加页码 |
-| `restart_page_numbering(section, *, start, add_footer_number, ...)` | 重启单节页码 |
-| `insert_section_with_page_numbering(*, start_page_number, ...)` | 插入节并重启页码（组合方法） |
-| `set_page_number_from_section(start_section_idx, *, start, ...)` | **跨节页码**：从指定节起编号，之前节无页码 |
+| `restart_page_numbering(section, *, start, add_footer_number, number_format, ...)` | 重启单节页码 |
+| `insert_section_with_page_numbering(*, start_page_number, number_format, ...)` | 插入节并重启页码（组合方法） |
+| `set_page_number_from_section(start_section_idx, *, start, number_format, ...)` | **跨节页码**：从指定节起编号，之前节无页码 |
+
+**页码编号格式**（`number_format`）支持 OOXML 原值与中文别名：
+
+| 取值 | 效果 |
+|------|------|
+| `decimal` / `阿拉伯数字` | 1, 2, 3（默认） |
+| `upperRoman` / `大写罗马` | Ⅰ, Ⅱ, Ⅲ —— 封面/目录常用 |
+| `lowerRoman` / `小写罗马` | i, ii, iii |
+| `chineseCounting` / `中文数字` | 一, 二, 三 |
+| `chineseCountingThousand` / `中文数字千` | 一, 二, … 一千 |
+| `decimalEnclosedCircle` / `带圈数字` | ①, ②, ③ |
+| `decimalFullWidth` / `全角数字` | １, ２, ３ |
+| `upperLetter` / `lowerLetter` | A, B / a, b |
 
 ```python
 # 文档有 3 个节：0=前置（封面/扉页/目录）, 1=正文起, 2=正文续
 formatter.set_page_number_from_section(
     start_section_idx=1, start=1,
     prefix="第 ", suffix=" 页", alignment="居中",
+    number_format="decimal",
 )
 # 节0 无页码，节1 从"第 1 页"开始，节2 链接前节延续编号
+
+# 目录页用罗马数字，正文用阿拉伯数字
+formatter.set_page_number_format(doc.sections[0], "upperRoman", start=1)
+```
+
+**横向插页与纵向正文混排**（宽表格、图纸）——`set_page_margins` 会作用于全文所有节，
+按节设置要用 `set_section_page` 或在 `insert_section` 里一步到位：
+
+```python
+# 方式一：插节时直接指定
+formatter.insert_section(
+    orientation="横向",
+    top=3.17, bottom=3.17, left=2.54, right=2.54,
+    add_page_number=True, restart_page_number=True,
+)
+
+# 方式二：对已有节单独调整（只改传入的项，其余保持不变）
+formatter.set_section_page(
+    doc.sections[3], orientation="横向", left=2.54, right=2.54,
+)
 ```
 
 ### 目录
@@ -292,6 +387,60 @@ formatter.heading("1. 一级标题")
 | `border_size`（边框粗细） | 1/8 pt（4 = 0.5pt 细线，8 = 1pt） |
 
 ## 版本说明
+
+### v0.7.0
+
+按「OCR 逆向版面 → 用 MCP 复刻排版」的实际缺口补齐能力，重点是多节混排文档与表格合并。
+
+**页眉页脚**
+
+- `set_header_parts()` / `set_footer_parts()`：一行内左中右三段分列，用制表位实现
+  （原先只能给一整段文字，做「公司名 + 报告名 + 页码」必须手工数空格）。
+- `set_different_first_page(section, enabled)`：本节首页使用独立页眉页脚（`w:titlePg`）。
+- `set_different_odd_even(enabled)`：全文奇偶页不同（文档级 `w:evenAndOddHeaders`）。
+- `set_header()` / `set_footer()` / `set_header_image()` / `set_footer_image()` /
+  `clear_header()` / `clear_footer()` / `header_footer_part()` 新增 `variant` 参数
+  （`primary` / `first` / `even`）。
+
+**页码**
+
+- `set_page_number_format(section, number_format, *, start)`：新增编号格式，
+  支持 `upperRoman`/`lowerRoman`/`chineseCounting`/`decimalEnclosedCircle` 等，
+  也接受 `大写罗马`/`小写罗马`/`中文数字`/`带圈数字` 等中文别名。
+- `number_format` 贯穿 `set_page_number_start()`、`restart_page_numbering()`、
+  `set_page_number_from_section()`、`insert_section()`。
+
+**分节**
+
+- `set_section_page(section, *, orientation, page_width, page_height, top, bottom, left, right, ...)`：
+  按节设置纸张方向/尺寸/页边距。原先 `set_page_margins()` 只能全文统一，
+  无法表达「正文纵向、插页横向」。
+- `insert_section()` 新增 `orientation` / `page_width` / `page_height` / 四个边距参数。
+
+**表格**
+
+- `add_table()` 新增 `merges`（合并单元格）、`row_heights`（行高）、
+  `table_width_cm`（总宽）、`cell_font_names`（逐格字体）、`font_name`（全局字体）。
+- 新增 `merge_cells(table, merges)` 与 `set_table_width(table, width_cm)`。
+- 合并约定：数据按完整网格给出，区域内容取左上角；越界与重叠会抛 `ValueError`。
+
+**段落**
+
+- `heading()` 新增 `alignment`，可做居中的大标题。
+- `heading()` 的 `alignment` / `space_before` / `space_after` 改写在**段落**上而非标题样式上，
+  修复同级标题互相串味的问题。
+- `insert_img()` 的 `width` 变为可选，且可直接传 `bytes`；宽高都省略时按图片自身 DPI
+  自动定尺寸，便于插入 PDF/扫描件裁切图。
+- `insert_img()` 新增 `floating` / `y_offset_pt`：让图片浮于文字上方，
+  用于印章压落款、以及从 PDF 裁出的图表与公式（原先只能内嵌，位置会被排版推着走）。
+
+**MCP 服务端**
+
+- 新增工具：`word_set_header_parts`、`word_set_footer_parts`、
+  `word_set_different_first_page`、`word_set_different_odd_even`、
+  `word_set_section_page`、`word_set_page_number_format`、`word_merge_cells`（共 43 个工具）。
+- 新增 `tests/test_mcp_formatter_sync.py`：用 AST 自动校验工具层触达的每个
+  `WordFormatter` 方法都存在且公开，杜绝「MCP 有工具、底层调不到」。
 
 ### v0.6.0
 
@@ -367,11 +516,13 @@ wc-report-mcp --transport streamable-http --port 8000
 word_create_report            → 拿到 doc_id
 word_add_cover_page           → 封面（需 Logo）
 word_set_default_font         → 正文字体（建议显式指定本机已装字体）
-word_insert_section           → 正文另起一节
+word_insert_section           → 正文另起一节（可同时给 orientation / margin_*_cm）
 word_add_toc                  → 目录
 word_add_heading / word_add_body_list / word_add_table ...
-word_set_header / word_set_footer
-word_set_page_numbers         → 正文从第 1 页开始编号
+word_set_header_parts         → 三段页眉（公司名 / 报告名 / 页码）
+word_set_different_first_page → 封面页不显示页眉页脚
+word_set_page_numbers         → 正文从第 1 页开始编号（可指定 number_format）
+word_set_section_page         → 横向插页按节改纸张方向与边距
 word_save_report              → 落盘，返回绝对路径
 ```
 
@@ -382,9 +533,9 @@ word_save_report              → 落盘，返回绝对路径
 | 会话 | `word_create_report`、`word_open_report`、`word_save_report`、`word_close_report`、`word_describe_report` |
 | 文档级设置 | `word_set_default_font`、`word_set_page_margins`、`word_set_document_language` |
 | 段落与标题 | `word_add_heading`、`word_add_body`、`word_add_body_list`、`word_add_blank_lines`、`word_add_cover_text`、`word_add_right_text`、`word_add_date`、`word_insert_image` |
-| 表格 | `word_add_table`、`word_format_cell`、`word_set_table_borders` |
-| 页眉页脚 | `word_set_header`、`word_set_footer`、`word_clear_header_footer`、`word_set_header_image` |
-| 节与页码 | `word_insert_section`、`word_set_page_numbers`、`word_restart_page_numbering`、`word_set_page_number_start` |
+| 表格 | `word_add_table`、`word_merge_cells`、`word_format_cell`、`word_set_table_borders` |
+| 页眉页脚 | `word_set_header`、`word_set_footer`、`word_set_header_parts`、`word_set_footer_parts`、`word_set_different_first_page`、`word_set_different_odd_even`、`word_clear_header_footer`、`word_set_header_image` |
+| 节与页码 | `word_insert_section`、`word_set_section_page`、`word_set_page_numbers`、`word_restart_page_numbering`、`word_set_page_number_start`、`word_set_page_number_format` |
 | 目录与样式 | `word_add_toc`、`word_set_toc_level_style`、`word_set_paragraph_style`、`word_add_custom_heading` |
 | 模板化组合 | `word_add_cover_page`、`word_add_signature_page` |
 | 独立工具 | `word_rmb_upper`（数字转大写，不需要 doc_id） |
@@ -394,7 +545,23 @@ word_save_report              → 落盘，返回绝对路径
 `word_add_signature_page`）同时接受 `image_path` 和 `image_base64`，后者支持裸串或
 `data:image/png;base64,...` 形式 —— 便于 AI 在拿不到本地文件路径时使用。
 
+`word_insert_image` 的 `width_cm` / `height_cm` 都可省略，此时按图片自身 DPI 使用原始尺寸，
+返回里的 `auto_sized` 会告诉 AI 走了哪条路径。
+
 `section_index` / `table_index` 默认 `-1`，表示最后一节 / 最后一个表格。
+
+### MCP 与 Python API 的同步保证
+
+工具层是 `WordFormatter` 的薄包装，**不存在「工具能用、代码调不到」的能力**：
+每个工具的底层调用都必须落在 `WordFormatter` 的公开方法上。这条约定由
+`tests/test_mcp_formatter_sync.py` 自动守住 —— 它解析 `mcp/tools.py` 的 AST，
+把里面触达的所有 `WordFormatter.<方法>` / `formatter.<方法>` 抽出来，逐个断言：
+
+1. 方法真实存在（改名/删除底层方法却忘了改工具层，立刻失败）；
+2. 方法是**公开**的（不靠私有方法走后门）；
+3. `TOOLS` 里每个工具都可按名字取到、可调用、有描述、无重复；
+4. 服务端真实注册的工具集合与 `TOOLS` 完全一致；
+5. `word_describe_api()` 覆盖全部公开方法（兜底通道没有盲区）。
 
 ### 兜底能力：全量覆盖
 

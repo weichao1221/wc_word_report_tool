@@ -622,3 +622,445 @@ def test_set_page_margins_supports_numeric_alignment(tmp_path):
     assert 'w:left="1417"' in document_xml
     assert 'w:right="1474"' in document_xml
     assert 'w:jc w:val="center"' in document_xml
+
+
+# ====================================================================
+# A1 · 页眉页脚：三段分列 / 首页不同 / 奇偶页不同
+# ====================================================================
+
+def test_set_header_parts_writes_tabs_and_tab_stops(tmp_path):
+    doc = Document()
+    formatter = WordFormatter(doc)
+    sec = doc.sections[0]
+
+    formatter.set_header_parts(sec, left="公司名", center="报告名", right="第 1 页")
+    out = tmp_path / "header-parts.docx"
+    doc.save(out)
+
+    with ZipFile(out) as zf:
+        header_xml = "".join(
+            zf.read(n).decode("utf-8", errors="ignore")
+            for n in zf.namelist() if n.startswith("word/header")
+        )
+
+    # 制表符必须落成 <w:tab/>，否则 Word 不会按制表位分列
+    assert header_xml.count("<w:tab/>") == 2
+    assert "公司名" in header_xml and "报告名" in header_xml and "第 1 页" in header_xml
+    # 居中 + 居右两个制表位
+    assert header_xml.count("<w:tab ") == 2
+    assert 'w:val="center"' in header_xml
+    assert 'w:val="right"' in header_xml
+
+
+def test_set_footer_parts_writes_three_segments(tmp_path):
+    doc = Document()
+    WordFormatter.set_footer_parts(
+        doc.sections[0], left="左", center="中", right="右",
+    )
+    out = tmp_path / "footer-parts.docx"
+    doc.save(out)
+
+    with ZipFile(out) as zf:
+        footer_xml = "".join(
+            zf.read(n).decode("utf-8", errors="ignore")
+            for n in zf.namelist() if n.startswith("word/footer")
+        )
+
+    assert "左" in footer_xml and "中" in footer_xml and "右" in footer_xml
+    assert footer_xml.count("<w:tab/>") == 2
+
+
+def test_different_first_page_and_odd_even_flags(tmp_path):
+    doc = Document()
+    formatter = WordFormatter(doc)
+    sec = doc.sections[0]
+
+    formatter.set_different_first_page(sec, True)
+    formatter.set_different_odd_even(True)
+    out = tmp_path / "variants.docx"
+    doc.save(out)
+
+    assert "<w:titlePg/>" in _read_zip_xml(out, "word/document.xml")
+    assert "evenAndOddHeaders" in _read_zip_xml(out, "word/settings.xml")
+
+
+def test_different_odd_even_can_be_turned_off(tmp_path):
+    doc = Document()
+    formatter = WordFormatter(doc)
+    formatter.set_different_odd_even(True)
+    formatter.set_different_odd_even(False)
+
+    out = tmp_path / "odd-even-off.docx"
+    doc.save(out)
+    assert "evenAndOddHeaders" not in _read_zip_xml(out, "word/settings.xml")
+
+
+def test_header_variants_write_to_separate_parts(tmp_path):
+    doc = Document()
+    formatter = WordFormatter(doc)
+    sec = doc.sections[0]
+    formatter.set_different_first_page(sec, True)
+    formatter.set_different_odd_even(True)
+
+    formatter.set_header(sec, "默认页眉")
+    formatter.set_header(sec, "首页页眉", variant="first")
+    formatter.set_header(sec, "偶数页页眉", variant="even")
+    out = tmp_path / "variants-parts.docx"
+    doc.save(out)
+
+    from docx import Document as _Read
+    reopened = _Read(str(out))
+    section = reopened.sections[0]
+
+    assert section.header.paragraphs[0].text == "默认页眉"
+    assert section.first_page_header.paragraphs[0].text == "首页页眉"
+    assert section.even_page_header.paragraphs[0].text == "偶数页页眉"
+
+
+def test_header_footer_part_rejects_unknown_variant():
+    doc = Document()
+
+    with pytest.raises(ValueError, match="未知的页眉页脚变体"):
+        WordFormatter.header_footer_part(doc.sections[0], variant="sidebar")
+
+
+# ====================================================================
+# A2 · 页码编号格式
+# ====================================================================
+
+def test_restart_page_numbering_writes_number_format(tmp_path):
+    doc = Document()
+    WordFormatter.restart_page_numbering(
+        doc.sections[0], start=3, number_format="upperRoman",
+    )
+    out = tmp_path / "roman.docx"
+    doc.save(out)
+
+    document_xml = _read_zip_xml(out, "word/document.xml")
+    assert 'w:fmt="upperRoman"' in document_xml
+    assert 'w:start="3"' in document_xml
+
+
+def test_page_number_format_accepts_chinese_alias(tmp_path):
+    doc = Document()
+    WordFormatter.set_page_number_format(doc.sections[0], "大写罗马")
+    out = tmp_path / "roman-alias.docx"
+    doc.save(out)
+
+    assert 'w:fmt="upperRoman"' in _read_zip_xml(out, "word/document.xml")
+
+
+def test_set_page_number_format_keeps_existing_start(tmp_path):
+    doc = Document()
+    sec = doc.sections[0]
+    WordFormatter.set_page_number_start(sec, 5)
+    WordFormatter.set_page_number_format(sec, "lowerRoman")
+    out = tmp_path / "fmt-only.docx"
+    doc.save(out)
+
+    document_xml = _read_zip_xml(out, "word/document.xml")
+    assert 'w:fmt="lowerRoman"' in document_xml
+    assert 'w:start="5"' in document_xml
+
+
+def test_unknown_page_number_format_raises():
+    with pytest.raises(ValueError, match="未知的页码格式"):
+        WordFormatter.resolve_page_number_format("romanNumerals99")
+
+
+# ====================================================================
+# A3 · 分节纸张方向 / 尺寸 / 边距
+# ====================================================================
+
+def test_set_section_page_swaps_dimensions_for_landscape(tmp_path):
+    doc = Document()
+    formatter = WordFormatter(doc)
+    sec = doc.sections[0]
+    portrait = (sec.page_width.cm, sec.page_height.cm)
+
+    formatter.set_section_page(sec, orientation="横向")
+    out = tmp_path / "landscape.docx"
+    doc.save(out)
+
+    assert sec.page_width.cm == pytest.approx(portrait[1], abs=0.1)
+    assert sec.page_height.cm == pytest.approx(portrait[0], abs=0.1)
+    assert 'w:orient="landscape"' in _read_zip_xml(out, "word/document.xml")
+
+
+def test_set_section_page_applies_only_given_margins():
+    doc = Document()
+    formatter = WordFormatter(doc)
+    sec = doc.sections[0]
+    original_bottom = sec.bottom_margin.cm
+
+    formatter.set_section_page(sec, left=2.54, right=2.54)
+
+    assert sec.left_margin.cm == pytest.approx(2.54, abs=0.01)
+    assert sec.right_margin.cm == pytest.approx(2.54, abs=0.01)
+    assert sec.bottom_margin.cm == pytest.approx(original_bottom, abs=0.01)
+
+
+def test_insert_section_sets_per_section_page_setup():
+    doc = Document()
+    formatter = WordFormatter(doc)
+    formatter.body("第一节")
+
+    sec = formatter.insert_section(
+        inherit_header=False, inherit_footer=False,
+        orientation="横向", top=3.17, bottom=3.17, left=2.54, right=2.54,
+    )
+
+    assert sec.page_width.cm > sec.page_height.cm
+    assert sec.left_margin.cm == pytest.approx(2.54, abs=0.01)
+    # 第一节仍保持纵向，说明是「按节」生效而不是全文
+    assert doc.sections[0].page_width.cm < doc.sections[0].page_height.cm
+
+
+def test_resolve_orientation_rejects_unknown_value():
+    with pytest.raises(ValueError, match="未知的纸张方向"):
+        WordFormatter.resolve_orientation("斜向")
+
+
+# ====================================================================
+# B1 · 标题对齐
+# ====================================================================
+
+def test_heading_supports_alignment(tmp_path):
+    doc = Document()
+    WordFormatter(doc).heading("居中大标题", level=1, font_size="二号", alignment="居中")
+    out = tmp_path / "heading-align.docx"
+    doc.save(out)
+
+    assert 'w:jc w:val="center"' in _read_zip_xml(out, "word/document.xml")
+
+
+def test_heading_alignment_is_per_paragraph_not_per_style():
+    """同一级标题对齐方式不同时不能互相串味。"""
+    doc = Document()
+    formatter = WordFormatter(doc)
+    centered = formatter.heading("居中标题", level=1, alignment="居中")
+    left = formatter.heading("居左标题", level=1)
+
+    assert centered.alignment == WD_PARAGRAPH_ALIGNMENT.CENTER
+    assert left.alignment is None
+
+
+def test_heading_rejects_unknown_alignment():
+    doc = Document()
+
+    with pytest.raises(ValueError, match="未知对齐方式"):
+        WordFormatter(doc).heading("标题", alignment="斜着放")
+
+
+def test_heading_accepts_space_before_and_after(tmp_path):
+    doc = Document()
+    para = WordFormatter(doc).heading("标题", space_before=18, space_after=6)
+    out = tmp_path / "heading-space.docx"
+    doc.save(out)
+
+    # w:before / w:after 以 1/20 pt 存储，18pt -> 360
+    document_xml = _read_zip_xml(out, "word/document.xml")
+    assert 'w:before="360"' in document_xml
+    assert 'w:after="120"' in document_xml
+    assert para.paragraph_format.space_before.pt == pytest.approx(18)
+    assert para.paragraph_format.space_after.pt == pytest.approx(6)
+
+
+def test_heading_spacing_is_per_paragraph_not_per_style():
+    """段间距写进样式会让同级标题互相覆盖，必须落在段落上。"""
+    doc = Document()
+    formatter = WordFormatter(doc)
+    first = formatter.heading("第一个", level=1, space_before=12)
+    second = formatter.heading("第二个", level=1, space_before=30)
+
+    assert first.paragraph_format.space_before.pt == pytest.approx(12)
+    assert second.paragraph_format.space_before.pt == pytest.approx(30)
+
+
+# ====================================================================
+# B2 · 表格合并单元格
+# ====================================================================
+
+def test_add_table_merges_cells(tmp_path):
+    doc = Document()
+    table = WordFormatter(doc).add_table(
+        headers=["序号", "项目", "金额", "备注"],
+        rows=[["1", "合并行", "100", "a"], ["2", "x", "200", "b"]],
+        merges=[{"row": 1, "col": 1, "rowspan": 1, "colspan": 2}],
+    )
+    out = tmp_path / "merged.docx"
+    doc.save(out)
+
+    document_xml = _read_zip_xml(out, "word/document.xml")
+    assert 'w:gridSpan w:val="2"' in document_xml
+    assert table.cell(1, 1).text == "合并行"
+
+
+def test_add_table_merge_uses_top_left_value_and_drops_extra_paragraphs(tmp_path):
+    doc = Document()
+    table = WordFormatter(doc).add_table(
+        headers=["A", "B", "C"],
+        rows=[["保留", "被忽略", "被忽略2"]],
+        merges=[(1, 0, 1, 3)],
+    )
+
+    assert table.cell(1, 0).text == "保留"
+    assert len(table.cell(1, 0).paragraphs) == 1
+
+
+def test_add_table_vertical_merge(tmp_path):
+    doc = Document()
+    table = WordFormatter(doc).add_table(
+        headers=["A", "B"],
+        rows=[["跨行", "1"], ["", "2"]],
+        merges=[{"row": 1, "col": 0, "rowspan": 2, "colspan": 1}],
+    )
+    out = tmp_path / "vmerge.docx"
+    doc.save(out)
+
+    assert 'w:vMerge' in _read_zip_xml(out, "word/document.xml")
+    assert table.cell(1, 0).text == "跨行"
+
+
+def test_merge_region_out_of_range_raises():
+    doc = Document()
+
+    with pytest.raises(ValueError, match="超出表格范围"):
+        WordFormatter(doc).add_table(
+            headers=["A", "B"], rows=[["1", "2"]],
+            merges=[{"row": 0, "col": 0, "colspan": 9}],
+        )
+
+
+def test_overlapping_merges_raise():
+    doc = Document()
+
+    with pytest.raises(ValueError, match="覆盖了同一个单元格"):
+        WordFormatter(doc).add_table(
+            headers=["A", "B", "C"], rows=[["1", "2", "3"]],
+            merges=[{"row": 0, "col": 0, "colspan": 2},
+                    {"row": 0, "col": 1, "colspan": 2}],
+        )
+
+
+def test_merge_cells_on_existing_table():
+    doc = Document()
+    formatter = WordFormatter(doc)
+    table = formatter.add_table(headers=["A", "B", "C"], rows=[["1", "2", "3"]])
+
+    WordFormatter.merge_cells(table, [(0, 0, 1, 3)])
+
+    assert table.cell(0, 0).text == "A"
+
+
+# ====================================================================
+# B5 · 表格总宽 / 行高 / 逐格字体
+# ====================================================================
+
+def test_add_table_supports_total_width_and_row_height(tmp_path):
+    doc = Document()
+    WordFormatter(doc).add_table(
+        headers=["A", "B"], rows=[["1", "2"], ["3", "4"]],
+        table_width_cm=12, row_heights=[1.0, 1.5, 2.0],
+    )
+    out = tmp_path / "table-size.docx"
+    doc.save(out)
+
+    document_xml = _read_zip_xml(out, "word/document.xml")
+    assert 'w:w="6804"' in document_xml          # 12cm -> 6804 twips
+    assert 'w:hRule="atLeast"' in document_xml
+
+
+def test_add_table_supports_per_cell_font_names(tmp_path):
+    doc = Document()
+    WordFormatter(doc).add_table(
+        headers=["A", "B"], rows=[["1", "2"]],
+        font_name="宋体",
+        cell_font_names=[["黑体", "黑体"], ["楷体_GB2312", None]],
+    )
+    out = tmp_path / "table-fonts.docx"
+    doc.save(out)
+
+    document_xml = _read_zip_xml(out, "word/document.xml")
+    assert 'w:eastAsia="黑体"' in document_xml
+    assert 'w:eastAsia="楷体_GB2312"' in document_xml
+    assert 'w:eastAsia="宋体"' in document_xml   # 未覆盖的位置回落到全局字体
+
+
+def test_set_table_width_rejects_non_positive():
+    doc = Document()
+    table = doc.add_table(rows=1, cols=1)
+
+    with pytest.raises(ValueError, match="表格宽度必须大于 0"):
+        WordFormatter.set_table_width(table, 0)
+
+
+# ====================================================================
+# B3 · 图片：自动尺寸与二进制输入
+# ====================================================================
+
+def test_insert_img_accepts_bytes_without_width(tmp_path):
+    doc = Document()
+    png = base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk"
+        "/x8AAusB9Y9Z4k8AAAAASUVORK5CYII="
+    )
+
+    WordFormatter(doc).insert_img(png)
+    out = tmp_path / "img-bytes.docx"
+    doc.save(out)
+
+    assert any(n.startswith("word/media/") for n in ZipFile(out).namelist())
+
+
+def test_insert_img_derives_width_from_image_dpi(tmp_path):
+    doc = Document()
+    png = tmp_path / "pic.png"
+    _write_test_png(png)
+
+    WordFormatter(doc).insert_img(str(png))
+    out = tmp_path / "img-auto.docx"
+    doc.save(out)
+
+    assert any(n.startswith("word/media/") for n in ZipFile(out).namelist())
+
+
+def test_insert_img_rejects_non_positive_width(tmp_path):
+    doc = Document()
+
+    with pytest.raises(ValueError, match="图片宽度必须大于 0"):
+        WordFormatter(doc).insert_img(str(_write_test_png(tmp_path / "p.png")), 0)
+
+
+def test_insert_img_missing_file_raises(tmp_path):
+    doc = Document()
+
+    with pytest.raises(FileNotFoundError, match="图片不存在"):
+        WordFormatter(doc).insert_img(str(tmp_path / "nope.png"), 2)
+
+
+def test_insert_img_supports_floating(tmp_path):
+    """印章需要浮在落款文字之上，不能被排版推来推去。"""
+    doc = Document()
+    formatter = WordFormatter(doc)
+    formatter.body("落款：某某公司")
+    png = _write_test_png(tmp_path / "seal.png")
+
+    formatter.insert_img(str(png), 3.0, alignment="居右", floating=True, y_offset_pt=6)
+    out = tmp_path / "seal.docx"
+    doc.save(out)
+
+    document_xml = _read_zip_xml(out, "word/document.xml")
+    assert "w:pict" in document_xml
+    assert "v:shape" in document_xml
+
+
+def test_insert_img_is_inline_by_default(tmp_path):
+    doc = Document()
+    WordFormatter(doc).insert_img(_write_test_png(tmp_path / "p.png"), 3.0)
+    out = tmp_path / "inline.docx"
+    doc.save(out)
+
+    document_xml = _read_zip_xml(out, "word/document.xml")
+    assert "w:pict" not in document_xml
+    assert "wp:inline" in document_xml

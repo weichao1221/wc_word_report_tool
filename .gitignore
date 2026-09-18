@@ -8,6 +8,9 @@ build/
 # Backup files
 *.bak
 
+# 本地 AI 助手配置（settings / taste），仅属于本机，不随包发布
+.commandcode/
+
 # macOS
 .DS_Store
 

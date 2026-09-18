@@ -401,3 +401,412 @@ def test_open_report_round_trips_an_existing_file():
 
     assert "原始内容" in document_xml
     assert "追加内容" in document_xml
+
+
+# ====================================================================
+# A1 · 页眉页脚：三段分列 / 首页 / 奇偶页
+# ====================================================================
+
+
+def test_set_header_parts_writes_tabs(tmp_path):
+    doc_id = tools.word_create_report()["doc_id"]
+
+    result = tools.word_set_header_parts(
+        doc_id, left="公司名", center="报告名", right="第 1 页",
+    )
+    saved = tools.word_save_report(doc_id, "header-parts.docx")
+
+    assert result["variant"] == "primary"
+    header_xml = "".join(
+        _read_zip_xml(Path(saved["saved_to"]), name)
+        for name in _zip_names(Path(saved["saved_to"]))
+        if name.startswith("word/header")
+    )
+    assert header_xml.count("<w:tab/>") == 2
+    assert "公司名" in header_xml and "报告名" in header_xml
+
+
+def test_set_footer_parts_writes_three_segments():
+    doc_id = tools.word_create_report()["doc_id"]
+
+    tools.word_set_footer_parts(doc_id, left="左", center="中", right="右")
+    saved = tools.word_save_report(doc_id, "footer-parts.docx")
+
+    footer_xml = "".join(
+        _read_zip_xml(Path(saved["saved_to"]), name)
+        for name in _zip_names(Path(saved["saved_to"]))
+        if name.startswith("word/footer")
+    )
+    assert "左" in footer_xml and "中" in footer_xml and "右" in footer_xml
+
+
+def test_different_first_page_and_odd_even_flags():
+    doc_id = tools.word_create_report()["doc_id"]
+
+    tools.word_set_different_first_page(doc_id, True)
+    tools.word_set_different_odd_even(doc_id, True)
+    saved = tools.word_save_report(doc_id, "flags.docx")
+    path = Path(saved["saved_to"])
+
+    assert "<w:titlePg/>" in _read_zip_xml(path, "word/document.xml")
+    assert "evenAndOddHeaders" in _read_zip_xml(path, "word/settings.xml")
+
+
+def test_header_variant_first_and_even_are_separate():
+    doc_id = tools.word_create_report()["doc_id"]
+
+    tools.word_set_different_first_page(doc_id, True)
+    tools.word_set_different_odd_even(doc_id, True)
+    tools.word_set_header(doc_id, "默认页眉")
+    tools.word_set_header(doc_id, "首页页眉", variant="first")
+    tools.word_set_header(doc_id, "偶数页页眉", variant="even")
+    saved = tools.word_save_report(doc_id, "header-variants.docx")
+
+    from docx import Document as _Read
+
+    section = _Read(saved["saved_to"]).sections[0]
+    assert section.header.paragraphs[0].text == "默认页眉"
+    assert section.first_page_header.paragraphs[0].text == "首页页眉"
+    assert section.even_page_header.paragraphs[0].text == "偶数页页眉"
+
+
+def test_unknown_header_variant_becomes_tool_error():
+    doc_id = tools.word_create_report()["doc_id"]
+
+    with pytest.raises(ToolError) as excinfo:
+        tools.word_set_header(doc_id, "页眉", variant="sidebar")
+
+    assert "未知的页眉页脚变体" in str(excinfo.value)
+
+
+def test_clear_header_footer_accepts_variant():
+    doc_id = tools.word_create_report()["doc_id"]
+    tools.word_set_different_first_page(doc_id, True)
+    tools.word_set_header(doc_id, "首页页眉", variant="first")
+
+    tools.word_clear_header_footer(doc_id, target="header", variant="first")
+    saved = tools.word_save_report(doc_id, "cleared-first.docx")
+
+    from docx import Document as _Read
+
+    section = _Read(saved["saved_to"]).sections[0]
+    assert section.first_page_header.paragraphs[0].text == ""
+
+
+# ====================================================================
+# A2 · 页码编号格式
+# ====================================================================
+
+
+def test_page_number_format_romans_are_persisted():
+    doc_id = tools.word_create_report()["doc_id"]
+
+    tools.word_set_page_number_format(doc_id, "upperRoman", start=1)
+    saved = tools.word_save_report(doc_id, "roman.docx")
+
+    document_xml = _read_zip_xml(Path(saved["saved_to"]), "word/document.xml")
+    assert 'w:fmt="upperRoman"' in document_xml
+
+
+def test_restart_page_numbering_accepts_number_format():
+    doc_id = tools.word_create_report()["doc_id"]
+
+    tools.word_restart_page_numbering(
+        doc_id, start=2, number_format="小写罗马",
+    )
+    saved = tools.word_save_report(doc_id, "roman-restart.docx")
+
+    document_xml = _read_zip_xml(Path(saved["saved_to"]), "word/document.xml")
+    assert 'w:fmt="lowerRoman"' in document_xml
+    assert 'w:start="2"' in document_xml
+
+
+def test_set_page_numbers_accepts_number_format():
+    doc_id = tools.word_create_report()["doc_id"]
+    tools.word_add_body(doc_id, "正文")
+
+    tools.word_set_page_numbers(
+        doc_id, start_section_index=0, start=1, number_format="chineseCounting",
+    )
+    saved = tools.word_save_report(doc_id, "chinese-numbering.docx")
+
+    assert 'w:fmt="chineseCounting"' in _read_zip_xml(
+        Path(saved["saved_to"]), "word/document.xml"
+    )
+
+
+def test_unknown_number_format_becomes_tool_error():
+    doc_id = tools.word_create_report()["doc_id"]
+
+    with pytest.raises(ToolError) as excinfo:
+        tools.word_set_page_number_format(doc_id, "roman99")
+
+    assert "未知的页码格式" in str(excinfo.value)
+
+
+# ====================================================================
+# A3 · 分节纸张与页边距
+# ====================================================================
+
+
+def test_insert_section_supports_landscape_and_margins():
+    doc_id = tools.word_create_report()["doc_id"]
+    tools.word_add_body(doc_id, "第一节")
+
+    result = tools.word_insert_section(
+        doc_id, orientation="横向",
+        margin_top_cm=3.17, margin_bottom_cm=3.17,
+        margin_left_cm=2.54, margin_right_cm=2.54,
+    )
+    saved = tools.word_save_report(doc_id, "landscape-section.docx")
+    document_xml = _read_zip_xml(Path(saved["saved_to"]), "word/document.xml")
+
+    assert result["section_index"] == 1
+    assert 'w:orient="landscape"' in document_xml
+
+
+def test_set_section_page_reports_new_size():
+    doc_id = tools.word_create_report()["doc_id"]
+
+    result = tools.word_set_section_page(doc_id, section_index=0, orientation="横向")
+
+    assert result["page_width_cm"] > result["page_height_cm"]
+
+
+def test_set_section_page_rejects_unknown_orientation():
+    doc_id = tools.word_create_report()["doc_id"]
+
+    with pytest.raises(ToolError) as excinfo:
+        tools.word_set_section_page(doc_id, orientation="斜向")
+
+    assert "未知的纸张方向" in str(excinfo.value)
+
+
+def test_set_section_page_index_out_of_range():
+    doc_id = tools.word_create_report()["doc_id"]
+
+    with pytest.raises(ToolError) as excinfo:
+        tools.word_set_section_page(doc_id, section_index=7)
+
+    assert "section_index 7 超出范围" in str(excinfo.value)
+
+
+# ====================================================================
+# B1 + B4 · 标题对齐与段间距
+# ====================================================================
+
+
+def test_add_heading_supports_alignment():
+    doc_id = tools.word_create_report()["doc_id"]
+
+    tools.word_add_heading(doc_id, "居中大标题", level=1, alignment="居中")
+    saved = tools.word_save_report(doc_id, "heading-align.docx")
+
+    assert 'w:jc w:val="center"' in _read_zip_xml(
+        Path(saved["saved_to"]), "word/document.xml"
+    )
+
+
+def test_add_heading_and_body_accept_space_params():
+    doc_id = tools.word_create_report()["doc_id"]
+
+    tools.word_add_heading(doc_id, "标题", space_before=18, space_after=6)
+    tools.word_add_body(doc_id, "正文", space_before=3, space_after=9)
+    saved = tools.word_save_report(doc_id, "space.docx")
+    document_xml = _read_zip_xml(Path(saved["saved_to"]), "word/document.xml")
+
+    assert 'w:before="360"' in document_xml
+    assert 'w:after="120"' in document_xml
+
+
+def test_add_body_list_accepts_space_params():
+    doc_id = tools.word_create_report()["doc_id"]
+
+    tools.word_add_body_list(doc_id, ["第一段", "第二段"], space_after=6)
+    saved = tools.word_save_report(doc_id, "space-list.docx")
+
+    assert 'w:after="120"' in _read_zip_xml(
+        Path(saved["saved_to"]), "word/document.xml"
+    )
+
+
+# ====================================================================
+# B2 + B5 · 表格合并 / 总宽 / 行高 / 逐格字体
+# ====================================================================
+
+
+def test_add_table_supports_merges():
+    doc_id = tools.word_create_report()["doc_id"]
+
+    tools.word_add_table(
+        doc_id,
+        headers=["序号", "项目", "金额", "备注"],
+        rows=[["1", "合并行", "100", "a"], ["2", "x", "200", "b"]],
+        merges=[{"row": 1, "col": 1, "rowspan": 1, "colspan": 2}],
+    )
+    saved = tools.word_save_report(doc_id, "merged.docx")
+
+    assert 'w:gridSpan w:val="2"' in _read_zip_xml(
+        Path(saved["saved_to"]), "word/document.xml"
+    )
+
+
+def test_add_table_supports_width_height_and_cell_fonts():
+    doc_id = tools.word_create_report()["doc_id"]
+
+    tools.word_add_table(
+        doc_id,
+        headers=["A", "B"],
+        rows=[["1", "2"]],
+        font_name="宋体",
+        table_width_cm=12,
+        row_heights=[1.0, 1.5],
+        cell_font_names=[["黑体", "黑体"], ["楷体_GB2312", None]],
+    )
+    saved = tools.word_save_report(doc_id, "table-extras.docx")
+    document_xml = _read_zip_xml(Path(saved["saved_to"]), "word/document.xml")
+
+    assert 'w:w="6804"' in document_xml          # 12cm
+    assert 'w:hRule="atLeast"' in document_xml
+    assert 'w:eastAsia="黑体"' in document_xml
+    assert 'w:eastAsia="楷体_GB2312"' in document_xml
+
+
+def test_add_table_merge_out_of_range_becomes_tool_error():
+    doc_id = tools.word_create_report()["doc_id"]
+
+    with pytest.raises(ToolError) as excinfo:
+        tools.word_add_table(
+            doc_id, headers=["A", "B"], rows=[["1", "2"]],
+            merges=[{"row": 0, "col": 0, "colspan": 5}],
+        )
+
+    assert "超出表格范围" in str(excinfo.value)
+
+
+def test_merge_cells_tool_keeps_only_anchor_text():
+    doc_id = tools.word_create_report()["doc_id"]
+    tools.word_add_table(doc_id, headers=["A", "B", "C"], rows=[["1", "2", "3"]])
+
+    tools.word_merge_cells(doc_id, merges=[{"row": 0, "col": 0, "colspan": 3}])
+    saved = tools.word_save_report(doc_id, "merge-existing.docx")
+
+    from docx import Document as _Read
+
+    table = _Read(saved["saved_to"]).tables[0]
+    assert table.cell(0, 0).text == "A"
+
+
+def test_merge_cells_requires_an_existing_table():
+    doc_id = tools.word_create_report()["doc_id"]
+
+    with pytest.raises(ToolError) as excinfo:
+        tools.word_merge_cells(doc_id, merges=[{"row": 0, "col": 0, "colspan": 2}])
+
+    assert "还没有表格" in str(excinfo.value)
+
+
+# ====================================================================
+# B3 · 图片自动尺寸
+# ====================================================================
+
+
+def test_insert_image_without_width_is_auto_sized():
+    doc_id = tools.word_create_report()["doc_id"]
+
+    result = tools.word_insert_image(doc_id, image_base64=TEST_PNG_B64)
+    saved = tools.word_save_report(doc_id, "auto-image.docx")
+
+    assert result["auto_sized"] is True
+    assert any(
+        name.startswith("word/media/") for name in _zip_names(Path(saved["saved_to"]))
+    )
+
+
+def test_insert_image_accepts_height_only():
+    doc_id = tools.word_create_report()["doc_id"]
+
+    result = tools.word_insert_image(doc_id, height_cm=2, image_base64=TEST_PNG_B64)
+    saved = tools.word_save_report(doc_id, "height-image.docx")
+
+    assert result["auto_sized"] is False
+    assert any(
+        name.startswith("word/media/") for name in _zip_names(Path(saved["saved_to"]))
+    )
+
+
+def test_insert_image_rejects_non_positive_width():
+    doc_id = tools.word_create_report()["doc_id"]
+
+    with pytest.raises(ToolError) as excinfo:
+        tools.word_insert_image(doc_id, width_cm=0, image_base64=TEST_PNG_B64)
+
+    assert "图片宽度必须大于 0" in str(excinfo.value)
+
+
+# ====================================================================
+# 端到端 · 横向插页 + 罗马数字页码 + 合并表
+# ====================================================================
+
+
+def test_landscape_insert_and_roman_numbering_end_to_end():
+    doc_id = tools.word_create_report(title="混排报告")["doc_id"]
+
+    tools.word_set_different_first_page(doc_id, True)
+    tools.word_set_header_parts(doc_id, left="公司", center="报告", right="机密")
+    tools.word_set_header(doc_id, "首页不显示页码", variant="first")
+    tools.word_set_page_numbers(
+        doc_id, start_section_index=0, start=1, number_format="upperRoman",
+    )
+    tools.word_add_heading(doc_id, "一、横向插页", level=1, alignment="居中")
+    tools.word_insert_section(
+        doc_id, orientation="横向",
+        margin_top_cm=3.17, margin_bottom_cm=3.17,
+        margin_left_cm=2.54, margin_right_cm=2.54,
+        add_page_number=True, restart_page_number=True,
+        start_page_number=1, number_format="decimal",
+    )
+    tools.word_add_table(
+        doc_id,
+        headers=["序号", "项目", "金额", "备注"],
+        rows=[["1", "合并", "100", "x"]],
+        merges=[{"row": 1, "col": 1, "colspan": 2}],
+        table_width_cm=15,
+    )
+
+    saved = tools.word_save_report(doc_id, "mixed-layout.docx")
+    path = Path(saved["saved_to"])
+    document_xml = _read_zip_xml(path, "word/document.xml")
+
+    assert path.is_file()
+    assert 'w:orient="landscape"' in document_xml
+    assert 'w:fmt="upperRoman"' in document_xml
+    assert 'w:gridSpan w:val="2"' in document_xml
+    assert "<w:titlePg/>" in document_xml
+
+
+def test_insert_image_supports_floating_for_seals():
+    """印章/图表需要浮于文字之上时走 floating。"""
+    doc_id = tools.word_create_report()["doc_id"]
+    tools.word_add_body(doc_id, "落款：某某公司")
+
+    result = tools.word_insert_image(
+        doc_id, width_cm=3, alignment="居右",
+        image_base64=TEST_PNG_B64, floating=True, y_offset_pt=6,
+    )
+    saved = tools.word_save_report(doc_id, "seal.docx")
+
+    assert result["floating"] is True
+    assert "w:pict" in _read_zip_xml(Path(saved["saved_to"]), "word/document.xml")
+
+
+def test_insert_image_is_inline_by_default():
+    doc_id = tools.word_create_report()["doc_id"]
+
+    result = tools.word_insert_image(doc_id, width_cm=3, image_base64=TEST_PNG_B64)
+    saved = tools.word_save_report(doc_id, "inline-image.docx")
+
+    assert result["floating"] is False
+    assert "w:pict" not in _read_zip_xml(
+        Path(saved["saved_to"]), "word/document.xml"
+    )

@@ -1,6 +1,8 @@
 from .numbers import NumberConverter, about_numbers, number_to_chinese_upper
 from .word import (
     FONT_SIZE_MAP,
+    PAGE_NUMBER_FORMATS,
+    ORIENTATION_MAP,
     DEFAULT_CN_FONT,
     DEFAULT_EN_FONT,
     DEFAULT_BODY_SIZE,
@@ -20,6 +22,8 @@ __all__ = [
     "about_word",
     # 常量
     "FONT_SIZE_MAP",
+    "PAGE_NUMBER_FORMATS",
+    "ORIENTATION_MAP",
     "DEFAULT_CN_FONT",
     "DEFAULT_EN_FONT",
     "DEFAULT_BODY_SIZE",

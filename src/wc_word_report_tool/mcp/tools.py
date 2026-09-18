@@ -301,7 +301,10 @@ def word_add_heading(
     font_size: FontSize = "三号",
     bold: bool = False,
     indent: bool = False,
+    alignment: Optional[str] = None,
     line_spacing: float = 1.5,
+    space_before: Optional[float] = None,
+    space_after: Optional[float] = None,
 ) -> Dict[str, Any]:
     """添加标题段落。
 
@@ -312,12 +315,16 @@ def word_add_heading(
     :param font_size: 字号，默认三号。
     :param bold: 是否加粗。
     :param indent: 是否首行缩进 2 字符。
+    :param alignment: 对齐方式，省略时沿用标题样式的居左。做居中的封面大标题时传 "居中"。
     :param line_spacing: 行距倍数，默认 1.5。
+    :param space_before: 段前空白（pt）；省略时按字号的 0.5 行计算。
+    :param space_after: 段后空白（pt）；省略时按字号的 0.5 行计算。
     """
     with _op(doc_id) as session:
         session.formatter.heading(
             text, level=level, font_name=font_name, font_size=font_size,
             bold=bold, indent=indent, line_spacing=line_spacing,
+            alignment=alignment, space_before=space_before, space_after=space_after,
         )
         return _result(session)
 
@@ -331,6 +338,8 @@ def word_add_body(
     bold: bool = False,
     alignment: str = "两端对齐",
     line_spacing: float = 1.5,
+    space_before: float = 0,
+    space_after: float = 0,
 ) -> Dict[str, Any]:
     """添加一个正文段落（默认宋体四号、首行缩进 2 字符、两端对齐、1.5 倍行距）。
 
@@ -342,11 +351,14 @@ def word_add_body(
     :param bold: 是否加粗。
     :param alignment: 对齐方式，支持 两端对齐/居中/居左/居右 或 left/center/right/justify。
     :param line_spacing: 行距倍数。
+    :param space_before: 段前空白，单位 pt。
+    :param space_after: 段后空白，单位 pt。
     """
     with _op(doc_id) as session:
         session.formatter.body(
             text, font_name=font_name, font_size=font_size, indent=indent,
             bold=bold, alignment=alignment, line_spacing=line_spacing,
+            space_before=space_before, space_after=space_after,
         )
         return _result(session)
 
@@ -360,6 +372,8 @@ def word_add_body_list(
     bold: bool = False,
     alignment: str = "两端对齐",
     line_spacing: float = 1.5,
+    space_before: float = 0,
+    space_after: float = 0,
 ) -> Dict[str, Any]:
     """批量添加多个正文段落，共用同一套格式参数（长报告建议用它减少调用次数）。
 
@@ -372,6 +386,7 @@ def word_add_body_list(
             session.formatter.body(
                 text, font_name=font_name, font_size=font_size, indent=indent,
                 bold=bold, alignment=alignment, line_spacing=line_spacing,
+                space_before=space_before, space_after=space_after,
             )
         return _result(session, added=len(texts))
 
@@ -395,6 +410,8 @@ def word_add_cover_text(
     bold: bool = True,
     alignment: str = "居中",
     line_spacing: float = 2,
+    space_before: Optional[float] = None,
+    space_after: Optional[float] = None,
 ) -> Dict[str, Any]:
     """添加封面文本（默认居中加粗、2 倍行距）。
 
@@ -405,11 +422,14 @@ def word_add_cover_text(
     :param bold: 是否加粗。
     :param alignment: 对齐方式。
     :param line_spacing: 行距倍数。
+    :param space_before: 段前空白（pt）；省略时按字号的 1 行计算。
+    :param space_after: 段后空白（pt）；省略时按字号的 1 行计算。
     """
     with _op(doc_id) as session:
         session.formatter.cover_text(
             text, font_name=font_name, font_size=font_size, bold=bold,
             alignment=alignment, line_spacing=line_spacing,
+            space_before=space_before, space_after=space_after,
         )
         return _result(session)
 
@@ -481,25 +501,44 @@ def word_add_date(
 
 def word_insert_image(
     doc_id: str,
-    width_cm: float,
+    width_cm: Optional[float] = None,
+    height_cm: Optional[float] = None,
     image_path: Optional[str] = None,
     image_base64: Optional[str] = None,
     alignment: str = "居左",
+    floating: bool = False,
+    y_offset_pt: float = 0,
 ) -> Dict[str, Any]:
     """插入一张图片到正文。
 
+    ``width_cm`` 与 ``height_cm`` 都不传时按图片自身的 DPI 使用原始尺寸，
+    因此从 PDF/扫描件裁切出来的图片可以直接插入，不需要先量一个宽度。
+
     :param doc_id: 会话 id。
-    :param width_cm: 图片宽度，单位 cm。
+    :param width_cm: 图片宽度，单位 cm；省略时按图片原始尺寸。
+    :param height_cm: 图片高度，单位 cm；省略时按图片原始尺寸。
     :param image_path: 图片路径（与 image_base64 二选一）。
     :param image_base64: 图片的 base64，支持裸串或 data:image/png;base64,... 形式。
     :param alignment: 段落对齐方式。
+    :param floating: 是否让图片浮于文字上方。印章要压在落款文字上时传 True，
+                     从 PDF 裁出的图表、公式同理。
+    :param y_offset_pt: 浮动图片的垂直偏移，单位 pt，正数上移、负数下移。
     """
     with _op(doc_id) as session:
         path = materialize_image(
             session, image_path=image_path, image_base64=image_base64, label="正文图片",
         )
-        session.formatter.insert_img(str(path), width_cm, alignment=alignment)
-        return _result(session)
+        session.formatter.insert_img(
+            str(path), width_cm, height=height_cm, alignment=alignment,
+            floating=floating, y_offset_pt=y_offset_pt,
+        )
+        return _result(
+            session,
+            width_cm=width_cm,
+            height_cm=height_cm,
+            auto_sized=width_cm is None and height_cm is None,
+            floating=floating,
+        )
 
 
 # ====================================================================
@@ -513,10 +552,15 @@ def word_add_table(
     rows: List[List[Any]],
     col_widths: Optional[List[float]] = None,
     font_size: FontSize = 12,
+    font_name: str = DEFAULT_CN_FONT,
     header_bold: bool = True,
     alignment: str = "居中",
     border_color: str = "000000",
     border_size: int = 4,
+    merges: Optional[List[Dict[str, int]]] = None,
+    row_heights: Optional[List[Optional[float]]] = None,
+    table_width_cm: Optional[float] = None,
+    cell_font_names: Optional[List[Optional[List[Optional[str]]]]] = None,
 ) -> Dict[str, Any]:
     """在末尾追加一个带表头的表格。
 
@@ -525,16 +569,26 @@ def word_add_table(
     :param rows: 二维数据列表，每个子列表是一行。
     :param col_widths: 每列宽度列表，单位 cm，可选。
     :param font_size: 表格字号。
+    :param font_name: 单元格中文字体名。
     :param header_bold: 表头是否加粗。
     :param alignment: 单元格对齐方式。
     :param border_color: 边框颜色，6 位十六进制 RGB。
     :param border_size: 边框粗细，单位 1/8 pt（4 = 0.5pt，8 = 1pt）。
+    :param merges: 合并区域列表，例如
+                   [{"row": 0, "col": 0, "rowspan": 1, "colspan": 4}]。
+                   行列索引从 0 开始、按完整网格计数；合并区域的内容取左上角单元格的值。
+    :param row_heights: 每行高度，单位 cm，可选；按「最小值」规则设置，内容超出会自动撑高。
+    :param table_width_cm: 表格总宽度，单位 cm，可选。
+    :param cell_font_names: 逐单元格中文字体名的二维列表（含表头行），可选；
+                            未覆盖的位置回落到 font_name。
     """
     with _op(doc_id) as session:
         table = session.formatter.add_table(
             headers, rows, col_widths=col_widths, font_size=font_size,
-            header_bold=header_bold, alignment=alignment,
+            font_name=font_name, header_bold=header_bold, alignment=alignment,
             border_color=border_color, border_size=border_size,
+            merges=merges, row_heights=row_heights,
+            table_width_cm=table_width_cm, cell_font_names=cell_font_names,
         )
         return _result(
             session,
@@ -542,6 +596,28 @@ def word_add_table(
             rows=len(table.rows),
             columns=len(table.columns),
         )
+
+
+def word_merge_cells(
+    doc_id: str,
+    merges: List[Dict[str, int]],
+    table_index: int = -1,
+) -> Dict[str, Any]:
+    """合并指定表格里的单元格区域（对已存在的表格操作）。
+
+    在 ``word_add_table`` 之后需要补合并时用它；新建表格时也可以直接在
+    ``word_add_table`` 里传 ``merges``。
+
+    :param doc_id: 会话 id。
+    :param merges: 合并区域列表，例如
+                   [{"row": 0, "col": 0, "rowspan": 1, "colspan": 3}]。
+                   行列索引从 0 开始、按完整网格计数。
+    :param table_index: 表格索引，默认 -1 表示文档中最后一个表格。
+    """
+    with _op(doc_id) as session:
+        table = _table(session, table_index)
+        WordFormatter.merge_cells(table, merges)
+        return _result(session, table_index=table_index, merged=len(merges or []))
 
 
 def word_format_cell(
@@ -612,6 +688,7 @@ def word_set_header(
     doc_id: str,
     text: str,
     section_index: int = -1,
+    variant: str = "primary",
     alignment: str = "居中",
     font_name: str = DEFAULT_HEADER_FOOTER_FONT,
     font_size: FontSize = DEFAULT_HEADER_FOOTER_SIZE,
@@ -624,6 +701,9 @@ def word_set_header(
     :param doc_id: 会话 id。
     :param text: 页眉文本。
     :param section_index: 节索引，默认 -1 表示最后一节。
+    :param variant: 页眉变体：primary（默认/奇数页）、first（首页）、even（偶数页）。
+                    使用 first 前需先用 word_set_different_first_page 打开本节开关；
+                    使用 even 前需先用 word_set_different_odd_even 打开全文开关。
     :param alignment: 文本对齐方式。
     :param font_name: 中文字体名。
     :param font_size: 字号。
@@ -634,17 +714,18 @@ def word_set_header(
     with _op(doc_id) as session:
         section = _section(session, section_index)
         WordFormatter.set_header(
-            section, text, alignment=alignment, font_name=font_name,
+            section, text, variant=variant, alignment=alignment, font_name=font_name,
             font_size=font_size, bottom_border=bottom_border,
             line_length=line_length, line_alignment=line_alignment,
         )
-        return _result(session, section_index=section_index)
+        return _result(session, section_index=section_index, variant=variant)
 
 
 def word_set_footer(
     doc_id: str,
     text: str,
     section_index: int = -1,
+    variant: str = "primary",
     alignment: str = "居中",
     font_name: str = DEFAULT_HEADER_FOOTER_FONT,
     font_size: FontSize = DEFAULT_HEADER_FOOTER_SIZE,
@@ -657,6 +738,7 @@ def word_set_footer(
     :param doc_id: 会话 id。
     :param text: 页脚文本。已有的页码域会被保留。
     :param section_index: 节索引，默认 -1 表示最后一节。
+    :param variant: 页脚变体：primary（默认/奇数页）、first（首页）、even（偶数页）。
     :param alignment: 文本对齐方式。
     :param font_name: 中文字体名。
     :param font_size: 字号。
@@ -667,23 +749,128 @@ def word_set_footer(
     with _op(doc_id) as session:
         section = _section(session, section_index)
         WordFormatter.set_footer(
-            section, text, alignment=alignment, font_name=font_name,
+            section, text, variant=variant, alignment=alignment, font_name=font_name,
             font_size=font_size, top_border=top_border,
             line_length=line_length, line_alignment=line_alignment,
         )
-        return _result(session, section_index=section_index)
+        return _result(session, section_index=section_index, variant=variant)
+
+
+def word_set_header_parts(
+    doc_id: str,
+    left: str = "",
+    center: str = "",
+    right: str = "",
+    section_index: int = -1,
+    variant: str = "primary",
+    font_name: str = DEFAULT_HEADER_FOOTER_FONT,
+    font_size: FontSize = DEFAULT_HEADER_FOOTER_SIZE,
+    bottom_border: bool = True,
+    line_length: Optional[float] = None,
+    line_alignment: str = "居左",
+) -> Dict[str, Any]:
+    """在一行内分左、中、右三段设置页眉（中文报告最常见的页眉形式）。
+
+    用制表位实现：左段贴版心左边界、中段居中、右段贴版心右边界。
+
+    :param doc_id: 会话 id。
+    :param left: 左段文本，如公司名。
+    :param center: 中段文本，如报告名。
+    :param right: 右段文本，如页码或密级。
+    :param section_index: 节索引，默认 -1 表示最后一节。
+    :param variant: primary / first / even。
+    :param font_name: 中文字体名。
+    :param font_size: 字号。
+    :param bottom_border: 是否给页眉段落加下横线。
+    :param line_length: 横线长度，单位 cm。
+    :param line_alignment: 横线对齐方式。
+    """
+    with _op(doc_id) as session:
+        WordFormatter.set_header_parts(
+            _section(session, section_index),
+            left=left, center=center, right=right, variant=variant,
+            font_name=font_name, font_size=font_size, bottom_border=bottom_border,
+            line_length=line_length, line_alignment=line_alignment,
+        )
+        return _result(session, section_index=section_index, variant=variant)
+
+
+def word_set_footer_parts(
+    doc_id: str,
+    left: str = "",
+    center: str = "",
+    right: str = "",
+    section_index: int = -1,
+    variant: str = "primary",
+    font_name: str = DEFAULT_HEADER_FOOTER_FONT,
+    font_size: FontSize = DEFAULT_HEADER_FOOTER_SIZE,
+    top_border: bool = True,
+    line_length: Optional[float] = None,
+    line_alignment: str = "居左",
+) -> Dict[str, Any]:
+    """在一行内分左、中、右三段设置页脚；参数含义同 word_set_header_parts。
+
+    :param top_border: 是否给页脚段落加上横线。
+    """
+    with _op(doc_id) as session:
+        WordFormatter.set_footer_parts(
+            _section(session, section_index),
+            left=left, center=center, right=right, variant=variant,
+            font_name=font_name, font_size=font_size, top_border=top_border,
+            line_length=line_length, line_alignment=line_alignment,
+        )
+        return _result(session, section_index=section_index, variant=variant)
+
+
+def word_set_different_first_page(
+    doc_id: str,
+    enabled: bool = True,
+    section_index: int = -1,
+) -> Dict[str, Any]:
+    """设置某节首页是否使用独立的页眉页脚（w:titlePg）。
+
+    打开后即可用 variant="first" 单独设置首页页眉页脚，常见于「首页不显示页码」。
+
+    :param doc_id: 会话 id。
+    :param enabled: 是否启用独立首页页眉页脚。
+    :param section_index: 节索引，默认 -1 表示最后一节。
+    """
+    with _op(doc_id) as session:
+        WordFormatter.set_different_first_page(
+            _section(session, section_index), enabled,
+        )
+        return _result(session, section_index=section_index, enabled=enabled)
+
+
+def word_set_different_odd_even(
+    doc_id: str,
+    enabled: bool = True,
+) -> Dict[str, Any]:
+    """设置全文奇偶页是否使用不同的页眉页脚（文档级 w:evenAndOddHeaders）。
+
+    打开后 variant="even" 的页眉页脚才会生效。注意这是**文档级**开关，
+    一旦打开，未单独设置偶页页眉的节会显示为空页眉。
+
+    :param doc_id: 会话 id。
+    :param enabled: 是否启用奇偶页不同。
+    """
+    with _op(doc_id) as session:
+        session.formatter.set_different_odd_even(enabled)
+        return _result(session, enabled=enabled)
 
 
 def word_clear_header_footer(
     doc_id: str,
     target: str = "header",
     section_index: int = -1,
+    variant: str = "primary",
 ) -> Dict[str, Any]:
     """清空某节的页眉或页脚。
 
     :param doc_id: 会话 id。
     :param target: header / footer / both。
     :param section_index: 节索引，默认 -1 表示最后一节。
+    :param variant: primary / first / even。
     """
     with _op(doc_id) as session:
         if target not in ("header", "footer", "both"):
@@ -692,16 +879,18 @@ def word_clear_header_footer(
             )
         section = _section(session, section_index)
         if target in ("header", "both"):
-            WordFormatter.clear_header(section)
+            WordFormatter.clear_header(section, variant=variant)
         if target in ("footer", "both"):
-            WordFormatter.clear_footer(section)
-        return _result(session, section_index=section_index, cleared=target)
+            WordFormatter.clear_footer(section, variant=variant)
+        return _result(session, section_index=section_index,
+                       variant=variant, cleared=target)
 
 
 def word_set_header_image(
     doc_id: str,
     target: str = "header",
     section_index: int = -1,
+    variant: str = "primary",
     width_cm: Optional[float] = None,
     height_cm: Optional[float] = None,
     image_path: Optional[str] = None,
@@ -716,6 +905,7 @@ def word_set_header_image(
     :param doc_id: 会话 id。
     :param target: header 或 footer。
     :param section_index: 节索引，默认 -1 表示最后一节。
+    :param variant: primary / first / even。
     :param width_cm: 图片宽度，单位 cm（与 height_cm 至少传一个）。
     :param height_cm: 图片高度，单位 cm。
     :param image_path: 图片路径（与 image_base64 二选一）。
@@ -741,11 +931,12 @@ def word_set_header_image(
             else WordFormatter.set_footer_image
         )
         setter(
-            section, str(path), width=width_cm, height=height_cm,
+            section, str(path), variant=variant, width=width_cm, height=height_cm,
             alignment=alignment, floating=floating, bottom_border=bottom_border,
             y_offset_pt=y_offset_pt,
         )
-        return _result(session, section_index=section_index, target=target)
+        return _result(session, section_index=section_index,
+                       variant=variant, target=target)
 
 
 # ====================================================================
@@ -763,8 +954,19 @@ def word_insert_section(
     prefix: str = "",
     suffix: str = "",
     alignment: str = "居中",
+    number_format: Optional[str] = None,
+    orientation: Optional[str] = None,
+    page_width_cm: Optional[float] = None,
+    page_height_cm: Optional[float] = None,
+    margin_top_cm: Optional[float] = None,
+    margin_bottom_cm: Optional[float] = None,
+    margin_left_cm: Optional[float] = None,
+    margin_right_cm: Optional[float] = None,
 ) -> Dict[str, Any]:
     """插入一个新节（默认从新页开始）。
+
+    横向插页与纵向正文混排时，用 orientation / margin_* 直接给本节设定纸张与边距，
+    不必先插节再单独调用 word_set_section_page。
 
     :param doc_id: 会话 id。
     :param add_page_number: 是否在本节设置页码。
@@ -775,6 +977,10 @@ def word_insert_section(
     :param prefix: 页码前缀，如 "第 "。
     :param suffix: 页码后缀，如 " 页"。
     :param alignment: 页码对齐方式。
+    :param number_format: 页码编号格式，如 "upperRoman"/"大写罗马"/"chineseCounting"。
+    :param orientation: 本节纸张方向，"纵向"/"横向" 或 portrait/landscape。
+    :param page_width_cm/page_height_cm: 本节纸张宽高，单位 cm，可选。
+    :param margin_top_cm/margin_bottom_cm/margin_left_cm/margin_right_cm: 本节页边距，单位 cm，可选。
     """
     with _op(doc_id) as session:
         session.formatter.insert_section(
@@ -783,8 +989,54 @@ def word_insert_section(
             start_page_number=start_page_number,
             inherit_header=inherit_header, inherit_footer=inherit_footer,
             prefix=prefix, suffix=suffix, alignment=alignment,
+            number_format=number_format, orientation=orientation,
+            page_width=page_width_cm, page_height=page_height_cm,
+            top=margin_top_cm, bottom=margin_bottom_cm,
+            left=margin_left_cm, right=margin_right_cm,
         )
         return _result(session, section_index=len(session.doc.sections) - 1)
+
+
+def word_set_section_page(
+    doc_id: str,
+    section_index: int = -1,
+    orientation: Optional[str] = None,
+    page_width_cm: Optional[float] = None,
+    page_height_cm: Optional[float] = None,
+    margin_top_cm: Optional[float] = None,
+    margin_bottom_cm: Optional[float] = None,
+    margin_left_cm: Optional[float] = None,
+    margin_right_cm: Optional[float] = None,
+    gutter_cm: Optional[float] = None,
+    horizontal_alignment: Optional[str] = None,
+) -> Dict[str, Any]:
+    """单独设置某一节的纸张方向、尺寸与页边距。
+
+    word_set_page_margins 会把边距应用到全文所有节；本节级设置有需要时用这个工具。
+
+    :param doc_id: 会话 id。
+    :param section_index: 节索引，默认 -1 表示最后一节。
+    :param orientation: "纵向"/"横向" 或 portrait/landscape；与当前方向不同时自动交换宽高。
+    :param page_width_cm/page_height_cm: 纸张宽高，单位 cm，可选。
+    :param margin_top_cm/margin_bottom_cm/margin_left_cm/margin_right_cm: 页边距，单位 cm，可选。
+    :param gutter_cm: 装订线宽度，单位 cm，可选。
+    :param horizontal_alignment: 页面水平对齐，支持 L/C/R 或 左对齐/居中/右对齐。
+    """
+    with _op(doc_id) as session:
+        section = _section(session, section_index)
+        session.formatter.set_section_page(
+            section, orientation=orientation,
+            page_width=page_width_cm, page_height=page_height_cm,
+            top=margin_top_cm, bottom=margin_bottom_cm,
+            left=margin_left_cm, right=margin_right_cm,
+            gutter=gutter_cm, horizontal_alignment=horizontal_alignment,
+        )
+        return _result(
+            session,
+            section_index=section_index,
+            page_width_cm=round(section.page_width.cm, 2),
+            page_height_cm=round(section.page_height.cm, 2),
+        )
 
 
 def word_set_page_numbers(
@@ -796,6 +1048,7 @@ def word_set_page_numbers(
     alignment: str = "居中",
     font_name: Optional[str] = None,
     font_size: Optional[FontSize] = None,
+    number_format: Optional[str] = None,
 ) -> Dict[str, Any]:
     """从指定节开始编页码，之前的节不带页码（跨节页码的主入口）。
 
@@ -809,11 +1062,14 @@ def word_set_page_numbers(
     :param alignment: 页码对齐方式。
     :param font_name: 页码字体名，省略时用默认中文字体。
     :param font_size: 页码字号，省略时用默认正文字号。
+    :param number_format: 页码编号格式，如 "upperRoman"/"大写罗马"、
+                          "chineseCounting"/"中文数字"；省略时用阿拉伯数字。
     """
     with _op(doc_id) as session:
         session.formatter.set_page_number_from_section(
             start_section_index, start=start, prefix=prefix, suffix=suffix,
             alignment=alignment, font_name=font_name, font_size=font_size,
+            number_format=number_format,
         )
         return _result(session, start_section_index=start_section_index)
 
@@ -826,6 +1082,7 @@ def word_restart_page_numbering(
     prefix: str = "",
     suffix: str = "",
     alignment: str = "居中",
+    number_format: Optional[str] = None,
 ) -> Dict[str, Any]:
     """重启某节的页码编号。
 
@@ -836,12 +1093,13 @@ def word_restart_page_numbering(
     :param prefix: 页码前缀。
     :param suffix: 页码后缀。
     :param alignment: 页码对齐方式。
+    :param number_format: 页码编号格式，如 "upperRoman"/"大写罗马"；省略时沿用原格式。
     """
     with _op(doc_id) as session:
         session.formatter.restart_page_numbering(
             _section(session, section_index), start=start,
             add_footer_number=add_footer_number, prefix=prefix, suffix=suffix,
-            alignment=alignment,
+            alignment=alignment, number_format=number_format,
         )
         return _result(session, section_index=section_index)
 
@@ -850,16 +1108,45 @@ def word_set_page_number_start(
     doc_id: str,
     start: int = 1,
     section_index: int = -1,
+    number_format: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """只设置某节页码的起始值，不添加页脚页码域。
+    """设置某节页码的起始值（可选同时设置编号格式），不添加页脚页码域。
 
     :param doc_id: 会话 id。
     :param start: 起始页码。
     :param section_index: 节索引，默认 -1 表示最后一节。
+    :param number_format: 页码编号格式，如 "upperRoman"/"大写罗马"/"chineseCounting"。
     """
     with _op(doc_id) as session:
-        WordFormatter.set_page_number_start(_section(session, section_index), start)
+        WordFormatter.set_page_number_start(
+            _section(session, section_index), start, number_format=number_format,
+        )
         return _result(session, section_index=section_index, start=start)
+
+
+def word_set_page_number_format(
+    doc_id: str,
+    number_format: str,
+    section_index: int = -1,
+    start: Optional[int] = None,
+) -> Dict[str, Any]:
+    """只设置某节的页码编号格式（不改动已有的页码域）。
+
+    封面用罗马数字、正文用阿拉伯数字时，配合 word_insert_section 分节后分别设置。
+
+    :param doc_id: 会话 id。
+    :param number_format: 编号格式，支持 decimal / upperRoman / lowerRoman /
+                          chineseCounting / decimalEnclosedCircle 等，也接受
+                          大写罗马 / 小写罗马 / 中文数字 / 带圈数字。
+    :param section_index: 节索引，默认 -1 表示最后一节。
+    :param start: 同时指定起始页码，可选。
+    """
+    with _op(doc_id) as session:
+        WordFormatter.set_page_number_format(
+            _section(session, section_index), number_format, start=start,
+        )
+        return _result(session, section_index=section_index,
+                       number_format=number_format, start=start)
 
 
 # ====================================================================
@@ -1187,18 +1474,25 @@ TOOLS = (
     word_insert_image,
     # Layer 2 · 表格
     word_add_table,
+    word_merge_cells,
     word_format_cell,
     word_set_table_borders,
     # Layer 2 · 页眉页脚
     word_set_header,
     word_set_footer,
+    word_set_header_parts,
+    word_set_footer_parts,
+    word_set_different_first_page,
+    word_set_different_odd_even,
     word_clear_header_footer,
     word_set_header_image,
     # Layer 2 · 节与页码
     word_insert_section,
+    word_set_section_page,
     word_set_page_numbers,
     word_restart_page_numbering,
     word_set_page_number_start,
+    word_set_page_number_format,
     # Layer 2 · 目录与样式
     word_add_toc,
     word_set_toc_level_style,

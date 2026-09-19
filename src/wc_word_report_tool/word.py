@@ -9,7 +9,7 @@
 3. **默认合理**：默认值贴近中国公文标准（仿宋_GB2312、三号 14pt、1.5 倍行距）。
 4. **严格校验**：未知参数抛 ValueError 而非静默降级，便于调试。
 
-版本：v0.7.1
+版本：v0.7.4
 作者：willcha
 """
 
@@ -27,11 +27,14 @@ from docx.enum.text import (
     WD_COLOR_INDEX,
     WD_PARAGRAPH_ALIGNMENT,
     WD_TAB_ALIGNMENT,
+    WD_UNDERLINE,
 )
 from docx.image.image import Image as _DocxImage
 from docx.oxml import OxmlElement, parse_xml
 from docx.oxml.ns import qn
 from docx.shared import Cm, Pt, RGBColor
+from docx.table import Table
+from docx.text.paragraph import Paragraph
 
 
 # ====================================================================
@@ -203,8 +206,8 @@ class WordFormatter:
     def set_run_font(run, *, cn_font: str, en_font: str = DEFAULT_EN_FONT,
                      size=14, bold: bool = False,
                      color: tuple[int, int, int] | None = None,
-                     highlight=None) -> None:
-        """设置 run 的字体（中英文分别设置）、字号、加粗、颜色、高亮。
+                     highlight=None, underline: bool | str = False) -> None:
+        """设置 run 的字体（中英文分别设置）、字号、加粗、颜色、高亮、下划线。
 
         :param run: python-docx 的 Run 对象
         :param cn_font: 中文字体名（写入 w:eastAsia）
@@ -213,6 +216,8 @@ class WordFormatter:
         :param bold: 是否加粗
         :param color: RGB 三元组，如 (255, 0, 0)
         :param highlight: WD_COLOR_INDEX 高亮颜色
+        :param underline: 下划线。``True`` 用单实线；也可传 ``"double"``/``"wave"`` 等
+                          ``WD_UNDERLINE`` 的取值名。``False`` 表示不划线。
         """
         run.font.bold = bold
         run.font.size = Pt(_to_pt(size))
@@ -222,32 +227,47 @@ class WordFormatter:
             run.font.color.rgb = RGBColor(*color)
         if highlight is not None:
             run.font.highlight_color = highlight
+        if underline:
+            # 需要显式写 w:u，因为 Word 的默认值不是「无」，不写会继承样式里的设置
+            style = underline if isinstance(underline, str) else "single"
+            run.font.underline = WD_UNDERLINE[style.upper()]
 
     # 旧名保留（私有方法被外部依赖，保留为公开别名）
 
     @staticmethod
     def set_paragraph_format(paragraph, *, alignment=None, line_spacing=1.5,
+                              line_spacing_pt: float | None = None,
                               space_before=0, space_after=0,
                               first_line_indent_pt=None,
                               first_line_indent_chars=None,
+                              left_indent_pt: float | None = None,
                               strict: bool = False):
         """设置段落基础格式。
 
         :param alignment: 对齐方式，支持中文、英文、单字母、数字和对齐枚举。
         :param paragraph: 目标段落。
         :param line_spacing: 行距倍数。
+        :param line_spacing_pt: 行距**固定值**，单位 pt；给了它就覆盖 ``line_spacing``。
+            从 PDF 还原版式时用它：PDF 里只有「相邻两行基线差多少 pt」这一个事实，
+            换算成倍数要依赖字体自身的行高（随字体而变），直接写 pt 才是精确的。
         :param space_before: 段前空白，单位 pt。
         :param space_after: 段后空白，单位 pt。
         :param first_line_indent_pt: 首行缩进兜底值，单位 pt；None 表示不设置。
         :param first_line_indent_chars: 首行缩进字符数；写入 ``w:firstLineChars``，
                                         优先级高于 ``w:firstLine``。
+        :param left_indent_pt: 整段左缩进，单位 pt；None 表示不设置。用于还原
+                               「整段右移」的表单行——它既不是居中，也不是首行缩进。
         :param strict: 是否对未知对齐方式抛出 ValueError，默认否。
         """
         if alignment is not None:
             paragraph.alignment = WordFormatter.resolve_alignment(alignment, strict=strict)
-        paragraph.paragraph_format.line_spacing = line_spacing
+        # 赋值 Pt 对象时 python-docx 会写 lineRule=exact（固定值）；赋数字则是倍数
+        paragraph.paragraph_format.line_spacing = (
+            Pt(line_spacing_pt) if line_spacing_pt else line_spacing)
         paragraph.paragraph_format.space_before = Pt(space_before)
         paragraph.paragraph_format.space_after = Pt(space_after)
+        if left_indent_pt is not None:
+            paragraph.paragraph_format.left_indent = Pt(left_indent_pt)
         WordFormatter._set_first_line_indent(
             paragraph,
             first_line_indent_pt=first_line_indent_pt,
@@ -497,7 +517,9 @@ class WordFormatter:
 
     def _add_heading_with_style(self, heading_text: str, *, level: int, cn_font: str, en_font: str,
                                 size, bold: bool, color: tuple[int, int, int] | None = None,
-                                line_spacing=1, space_before=12, space_after=12,
+                                line_spacing=1, line_spacing_pt: float | None = None,
+                                left_indent_pt: float | None = None,
+                                space_before=12, space_after=12,
                                 first_line_indent=28, first_line_indent_chars=2,
                                 alignment=None):
         self._configure_heading_style(
@@ -514,6 +536,11 @@ class WordFormatter:
         # （例如居中的封面大标题与居左的正文一级标题），写进样式会互相串味。
         heading.paragraph_format.space_before = Pt(space_before)
         heading.paragraph_format.space_after = Pt(space_after)
+        if line_spacing_pt:
+            # 行距固定值同样只写段落：样式里存的是倍数，混用会互相覆盖
+            heading.paragraph_format.line_spacing = Pt(line_spacing_pt)
+        if left_indent_pt:
+            heading.paragraph_format.left_indent = Pt(left_indent_pt)
         if alignment is not None:
             heading.alignment = self.resolve_alignment(alignment, strict=True)
         return heading
@@ -605,8 +632,10 @@ class WordFormatter:
 
     def body(self, text: str, *, font_name: str = "宋体", font_size="四号",
              indent: bool = True, bold: bool = False, highlight: bool = False,
-             alignment="两端对齐", line_spacing=1.5,
-             space_before=0, space_after=0):
+             underline: bool | str = False,
+             alignment="两端对齐", line_spacing=1.5, line_spacing_pt: float = 0,
+             left_indent_pt: float = 0,
+             space_before=0, space_after=0, page_break_before: bool = False):
         """添加正文段落。
 
         默认格式：宋体、四号、首行缩进 2 字符、两端对齐、1.5 倍行距。
@@ -621,6 +650,8 @@ class WordFormatter:
                        ``w:firstLineChars=\"200\"``。
         :param bold: 是否加粗，默认 ``False``。
         :param highlight: 是否使用黄色高亮，默认 ``False``。
+        :param underline: 整段是否加下划线，默认 ``False``；``True`` 为单实线，
+                          也可传 ``"double"``/``"wave"`` 等 ``WD_UNDERLINE`` 取值名。
         :param alignment: 段落对齐方式，默认 ``"两端对齐"``。支持
                           ``"居左"``/``"左对齐"``、``"居中"``、
                           ``"居右"``/``"右对齐"``、``"两端对齐"``，
@@ -631,6 +662,9 @@ class WordFormatter:
         :param line_spacing: 行距倍数，默认 ``1.5``；例如 ``1.0``、``1.5``、``2.0``。
         :param space_before: 段前空白，默认 ``0``，单位 pt。
         :param space_after: 段后空白，默认 ``0``，单位 pt。
+        :param page_break_before: 是否在本段之前分页，默认 ``False``。
+            优先用它而不是单独插分页符：该属性在段落已经处于页首时自动失效，
+            不会像独立分页段落那样多顶出一张空白页。
         :return: 新创建的 ``Paragraph`` 对象。
         """
         par = self.doc.add_paragraph("")
@@ -638,15 +672,19 @@ class WordFormatter:
             par,
             alignment=self.resolve_alignment(alignment),
             line_spacing=line_spacing,
+            line_spacing_pt=line_spacing_pt or None,
+            left_indent_pt=left_indent_pt or None,
             space_before=space_before,
             space_after=space_after,
             first_line_indent_pt=_to_pt(font_size) * 2 if indent else None,
             first_line_indent_chars=2 if indent else None,
         )
+        if page_break_before:
+            par.paragraph_format.page_break_before = True
         run = par.add_run(text)
         self.set_run_font(
             run, cn_font=font_name, size=font_size, color=(0, 0, 0),
-            bold=bold,
+            bold=bold, underline=underline,
             highlight=WD_COLOR_INDEX.YELLOW if highlight else None,
         )
         return par
@@ -660,12 +698,95 @@ class WordFormatter:
             self.doc.add_paragraph("")
         return self.doc
 
+    def add_page_break(self, text: str = ""):
+        """插入一个分页符（可同时带一段文字）。
+
+        模板类文档常常「一个表单起一页」，把这些分页还原出来才能对上原稿的页序；
+        只靠内容自然流排的话，页数和每页内容都会错位。
+
+        :param text: 分页符之后要写的文字，默认空（纯分页）。
+        :return: 承载分页符的 ``Paragraph``。
+        """
+        paragraph = self.doc.add_paragraph("")
+        run = paragraph.add_run()
+        br = OxmlElement("w:br")
+        br.set(qn("w:type"), "page")
+        run._r.append(br)
+        if text:
+            text_run = paragraph.add_run(text)
+            self.set_run_font(
+                text_run, cn_font=DEFAULT_CN_FONT, en_font=DEFAULT_EN_FONT,
+                size=DEFAULT_BODY_SIZE,
+            )
+        return paragraph
+
+    def body_segments(self, segments, *, font_name: str = "宋体", font_size="四号",
+                      indent: bool = True, alignment="两端对齐", line_spacing=1.5,
+                      line_spacing_pt: float = 0, left_indent_pt: float = 0,
+                      space_before=0, space_after=0, page_break_before: bool = False):
+        """在一段里写入多个「片段」，每段可单独高亮或加下划线。
+
+        用于「标签 + 填值」这类只需要对其中一部分做标记的场景：
+        ``[("项目名称：", False), ("雄安新区示范工程", True)]`` 只会把填进去的值标黄，
+        标签保持原样；整段高亮会把标签也涂黄，看起来分不清哪些是 AI 填的。
+
+        下划线同理：招投标模板里「填空线」只画在填进去的值下面，占位标签不划线，
+        所以下划线也必须是**逐片段**的。
+
+        :param segments: ``[(文本, 是否高亮)]`` 序列；也可传
+                         ``{"text":..., "highlight":..., "underline":...}``。
+                         字典形式才支持逐片段下划线。
+        :param font_name: 中文字体名称。
+        :param font_size: 字号，支持中文字号字符串。
+        :param indent: 是否首行缩进 2 字符。
+        :param alignment: 段落对齐方式。
+        :param line_spacing: 行距倍数。
+        :param space_before: 段前空白，单位 pt。
+        :param space_after: 段后空白，单位 pt。
+        :param page_break_before: 是否在本段之前分页。
+        :return: 新创建的 ``Paragraph`` 对象。
+        """
+        par = self.doc.add_paragraph("")
+        self.set_paragraph_format(
+            par,
+            alignment=self.resolve_alignment(alignment),
+            line_spacing=line_spacing,
+            line_spacing_pt=line_spacing_pt or None,
+            left_indent_pt=left_indent_pt or None,
+            space_before=space_before,
+            space_after=space_after,
+            first_line_indent_pt=_to_pt(font_size) * 2 if indent else None,
+            first_line_indent_chars=2 if indent else None,
+        )
+        if page_break_before:
+            par.paragraph_format.page_break_before = True
+
+        for segment in segments or []:
+            if isinstance(segment, dict):
+                text = segment.get("text", "")
+                highlight = bool(segment.get("highlight"))
+                underline = segment.get("underline", False)
+            else:
+                text, highlight = segment[0], bool(segment[1])
+                underline = False
+            if not text:
+                continue
+            run = par.add_run(str(text))
+            self.set_run_font(
+                run, cn_font=font_name, size=font_size, color=(0, 0, 0),
+                underline=underline,
+                highlight=WD_COLOR_INDEX.YELLOW if highlight else None,
+            )
+        return par
+
     def heading(self, text: str, *, level: int = 1,
                 font_name: str = "黑体", font_size="三号",
                 bold: bool = False,
-                indent: bool = False, line_spacing=1.5,
+                indent: bool = False, line_spacing=1.5, line_spacing_pt: float = 0,
+                left_indent_pt: float = 0,
                 alignment=None,
-                 space_before=None, space_after=None):
+                 space_before=None, space_after=None,
+                page_break_before: bool = False):
         """添加通用标题，默认一级标题格式。
 
         :param text: 标题文本。
@@ -675,22 +796,30 @@ class WordFormatter:
         :param bold: 是否加粗，默认否。
         :param indent: 是否首行缩进 2 字符，默认否。
         :param line_spacing: 行距倍数，默认 1.5。
+        :param line_spacing_pt: 行距固定值，单位 pt；给了它覆盖 ``line_spacing``。
         :param alignment: 对齐方式，默认不设置（沿用标题样式的居左）。
                           传 ``"居中"`` 可做居中的大标题，支持中文、英文、单字母、数字和对齐枚举。
         :param space_before: 段前空白，单位 pt；不传时按字号的 0.5 行计算。
         :param space_after: 段后空白，单位 pt；不传时按字号的 0.5 行计算。
+        :param page_break_before: 是否在本标题之前分页，默认 ``False``。
+            该属性在标题已处于页首时自动失效，不会多顶出空白页。
         """
         if level < 1 or level > 9:
             raise ValueError("标题 level 必须在 1 到 9 之间")
-        return self._add_heading_with_style(
+        paragraph = self._add_heading_with_style(
             text, level=level, cn_font=font_name, en_font=DEFAULT_EN_FONT,
             size=font_size, bold=bold, line_spacing=line_spacing,
+            line_spacing_pt=line_spacing_pt or None,
+            left_indent_pt=left_indent_pt or None,
             space_before=_to_pt(font_size) * 0.5 if space_before is None else space_before,
             space_after=_to_pt(font_size) * 0.5 if space_after is None else space_after,
             first_line_indent=_to_pt(font_size) * 2 if indent else None,
             first_line_indent_chars=2 if indent else None, color=(0, 0, 0),
             alignment=alignment,
         )
+        if page_break_before:
+            paragraph.paragraph_format.page_break_before = True
+        return paragraph
 
     def cover_text(self, text: str, *, font_name: str = "方正小标宋简体",
                    font_size=24, bold: bool = True, alignment="居中",
@@ -1065,8 +1194,9 @@ class WordFormatter:
 
     @staticmethod
     def set_cell(cell, text: str, *, font_name: str = DEFAULT_CN_FONT, font_size=12,
-                 bold: bool = False, alignment="居中", line_spacing=1.25):
-        """设置表格单元格内容与格式（增强版，支持加粗与对齐）。
+                 bold: bool = False, alignment="居中", line_spacing=1.25,
+                 highlight: bool = False):
+        """设置表格单元格内容与格式（增强版，支持加粗、对齐与高亮）。
 
         :param cell: docx.table._Cell 对象。
         :param text: 单元格文本。
@@ -1075,6 +1205,8 @@ class WordFormatter:
         :param bold: 是否加粗，默认否。
         :param alignment: 对齐方式，默认居中，支持中文、英文、单字母、数字和对齐枚举。
         :param line_spacing: 行距倍数，默认 1.25。
+        :param highlight: 是否黄色高亮，默认否。用于标出「由 AI 填写的临时数据」，
+                          方便人工复核。
         """
         paragraph = cell.paragraphs[0]
         paragraph.alignment = WordFormatter.resolve_alignment(alignment, strict=True)
@@ -1085,7 +1217,10 @@ class WordFormatter:
         for run in list(paragraph.runs):
             run._r.getparent().remove(run._r)
         run = paragraph.add_run(text)
-        WordFormatter.set_run_font(run, cn_font=font_name, size=font_size, bold=bold)
+        WordFormatter.set_run_font(
+            run, cn_font=font_name, size=font_size, bold=bold,
+            highlight=WD_COLOR_INDEX.YELLOW if highlight else None,
+        )
         return cell
 
     @staticmethod
@@ -1117,6 +1252,63 @@ class WordFormatter:
             if index < len(texts) - 1:
                 run.add_break()
         return cell
+
+    @staticmethod
+    def set_table_columns(table, col_widths, *, fixed_layout: bool = True):
+        """设置表格的列宽，并让 Word **真正按这个宽度渲染**。
+
+        只写 ``w:tcW`` 是不够的：python-docx 建表时写的是 ``w:tblW type="auto"``
+        且不设 ``w:tblLayout``，Word 会按自动布局重新分配列宽，把手工算好的列宽冲掉。
+        因此这里一次写全三处，缺一不可：
+
+        * ``w:tblGrid/w:gridCol`` —— Word 计算列布局的基准网格；
+        * 每个单元格的 ``w:tcW`` —— 实际列宽（合并单元格按其跨列数写合计值）；
+        * ``w:tblW`` + ``w:tblLayout type="fixed"`` —— 声明固定布局，禁止自动重排。
+
+        :param table: docx.table.Table 对象。
+        :param col_widths: 每列宽度列表，单位 cm，长度等于表格列数。
+        :param fixed_layout: 是否锁定为固定布局，默认是。
+        """
+        widths = [float(w) for w in (col_widths or [])]
+        if not widths:
+            raise ValueError("col_widths 不能为空")
+        if any(w <= 0 for w in widths):
+            raise ValueError(f"列宽必须全部大于 0，收到 {col_widths!r}")
+
+        tbl = table._tbl
+        grid = tbl.find(qn("w:tblGrid"))
+        if grid is None:
+            grid = OxmlElement("w:tblGrid")
+            tbl.insert(list(tbl).index(tbl.tblPr) + 1, grid)
+        for col in list(grid.findall(qn("w:gridCol"))):
+            grid.remove(col)
+        for width in widths:
+            col = OxmlElement("w:gridCol")
+            col.set(qn("w:w"), str(int(round(width * 566.929))))   # cm -> twips
+            grid.append(col)
+
+        # 逐单元格写 tcW：按真实 tc 元素遍历（不能用 row.cells——合并后它会重复返回
+        # 同一个锚点单元格，跨列数会被重复计算），合并单元格写它跨越列的合计宽度。
+        from docx.table import _Cell
+        for tr in tbl.tr_lst:
+            grid_col = 0
+            for tc in tr.tc_lst:
+                if grid_col >= len(widths):
+                    break
+                span = tc.grid_span
+                total = sum(widths[grid_col:grid_col + span]) or widths[grid_col]
+                _Cell(tc, table).width = Cm(total)
+                grid_col += span
+
+        WordFormatter.set_table_width(table, sum(widths))
+        if fixed_layout:
+            tbl_pr = tbl.tblPr
+            layout = tbl_pr.find(qn("w:tblLayout"))
+            if layout is None:
+                layout = OxmlElement("w:tblLayout")
+                tbl_pr.append(layout)
+            layout.set(qn("w:type"), "fixed")
+        return table
 
     @staticmethod
     def set_table_width(table, width_cm: float):
@@ -1265,7 +1457,7 @@ class WordFormatter:
                   font_name: str = DEFAULT_CN_FONT,
                   border_color: str = "000000", border_size: int = 4,
                   merges=None, row_heights=None, table_width_cm=None,
-                  cell_font_names=None):
+                  cell_font_names=None, cell_highlights=None):
         """一站式创建带表头的表格。
 
         ``headers`` 与 ``rows`` 组成**矩形网格**：每行的单元格数不能多于表头列数，
@@ -1287,6 +1479,8 @@ class WordFormatter:
         :param table_width_cm: 表格总宽度，单位 cm，可选。
         :param cell_font_names: 逐单元格中文字体名的二维列表（含表头那一行），可选；
                                 未覆盖的位置回落到 ``font_name``。
+        :param cell_highlights: 逐单元格「是否黄色高亮」的二维布尔列表（含表头那一行），
+                                可选。用来标出由 AI 填写的临时数据，便于人工复核。
         :return: docx.table.Table 对象
         """
         row_count = 1 + len(rows)
@@ -1300,15 +1494,14 @@ class WordFormatter:
 
         regions = self._normalize_table_merges(merges, row_count, col_count)
 
-        # 列宽必须在合并之前按完整网格写：合并后再写会把 tcW 落到跨列单元格上，列宽失真
-        if col_widths:
-            for r in table.rows:
-                for i, w in enumerate(col_widths):
-                    r.cells[i].width = Cm(w)
-
         # 先合并再填内容：反过来会被 python-docx 把被并单元格的文本一并拼接进合并格
         for r1, c1, r2, c2 in regions:
             table.cell(r1, c1).merge(table.cell(r2, c2))
+
+        # 列宽放在合并之后：合并单元格的 tcW 要写成它跨越列的合计宽度，
+        # 而「跨了几列」只有合并完成、gridSpan 落定之后才知道。
+        if col_widths:
+            self.set_table_columns(table, col_widths)
 
         covered = set()
         for r1, c1, r2, c2 in regions:
@@ -1325,6 +1518,7 @@ class WordFormatter:
                 cell, str(value),
                 font_name=self._pick_from_grid(cell_font_names, row, col, font_name),
                 font_size=font_size, bold=bold, alignment=alignment,
+                highlight=bool(self._pick_from_grid(cell_highlights, row, col, False)),
             )
             if (row, col) in {(r1, c1) for r1, c1, _, _ in regions}:
                 self._strip_extra_paragraphs(cell)
@@ -1335,6 +1529,7 @@ class WordFormatter:
             for c_idx, value in enumerate(row):
                 write(r_idx, c_idx, value, False)
 
+        # 行高最后设：合并会重建 tr，先设会被丢掉
         if row_heights:
             for row, height in zip(table.rows, row_heights):
                 if height is None:
@@ -2390,6 +2585,350 @@ class WordFormatter:
         toc_par = self.doc.add_paragraph("")
         self._append_field_run(toc_par, instruction)
         return toc_par
+
+    # ================================================================
+    # 8. 模板填充（在已有内容上原位改写）
+    # ================================================================
+    #
+    # 前面各节都是「从空白文档按顺序追加」，适合生成报告；但招投标这类模板是
+    # 「拿一份现成的 .docx，把里面的空填上」，追加型接口会把内容写到文档末尾。
+    # 本节补的就是这条缺失的路：先看清已有内容，再就地改写，且格式沿用原处。
+
+    @staticmethod
+    def _style_chain(style) -> list:
+        """段落样式的继承链：自身 -> 基样式 -> … -> Normal。"""
+        chain = []
+        seen = set()
+        current = style
+        while current is not None and id(current) not in seen:
+            seen.add(id(current))
+            chain.append(current)
+            current = current.base_style
+        return chain
+
+    @staticmethod
+    def _document_default_font(paragraph):
+        """从 styles.xml 的 ``docDefaults`` 取默认中文字体与字号。"""
+        part = getattr(paragraph, "part", None)
+        styles = getattr(part, "styles", None)
+        if styles is None:
+            return None, None
+        for r_pr in styles.element.xpath("./w:docDefaults/w:rPrDefault/w:rPr"):
+            fonts = r_pr.find(qn("w:rFonts"))
+            name = None
+            if fonts is not None:
+                name = fonts.get(qn("w:eastAsia")) or fonts.get(qn("w:ascii"))
+            size = None
+            sz = r_pr.find(qn("w:sz"))
+            if sz is not None:
+                try:
+                    size = Pt(float(sz.get(qn("w:val"))) / 2)
+                except (TypeError, ValueError):
+                    size = None
+            return name, size
+        return None, None
+
+    @staticmethod
+    def _effective_font(paragraph, run=None):
+        """解析**实际生效**的 (中文字体名, 字号)，run 可为 None。
+
+        模板里的 run 常常一个字体属性都不写，全靠样式继承；只读 run 会得到一片 None，
+        AI 就会以为「原文没有字体」而自己指定一个，反而破坏一致性。这里按
+        run -> 段落样式链 -> docDefaults 的顺序逐层回落。
+
+        ``run`` 传 None 表示段落本身还没有 run（模板里的空格子），
+        此时全部从样式链取，用来给新写入的内容一个和邻居一致的字体。
+        """
+        name = None
+        size = None
+        if run is not None:
+            r_pr = run._r.rPr
+            fonts = r_pr.rFonts if r_pr is not None else None
+            if fonts is not None:
+                name = fonts.get(qn("w:eastAsia"))
+            size = run.font.size
+
+        style = getattr(paragraph, "style", None)
+        for level in WordFormatter._style_chain(style):
+            level_r_pr = level.element.find(qn("w:rPr"))
+            if name is None and level_r_pr is not None:
+                level_fonts = level_r_pr.find(qn("w:rFonts"))
+                if level_fonts is not None:
+                    name = level_fonts.get(qn("w:eastAsia"))
+            if size is None:
+                size = level.font.size
+            if name is not None and size is not None:
+                break
+
+        if name is None or size is None:
+            default_name, default_size = WordFormatter._document_default_font(paragraph)
+            if name is None:
+                name = default_name
+            if size is None:
+                size = default_size
+        return name, size
+
+    @staticmethod
+    def _run_font_info(paragraph, run) -> dict:
+        """读取 run 实际生效的字体（中文字体名、字号 pt、是否加粗）。"""
+        name, size = WordFormatter._effective_font(paragraph, run)
+        return {
+            "text": run.text,
+            "font_name": name,
+            "font_size_pt": round(size.pt, 2) if size is not None else None,
+            "bold": run.font.bold is True,
+        }
+
+    @staticmethod
+    def _truncate(text: str, limit: int) -> str:
+        """按 limit 截断文本，超长时补省略号；limit 为 0 表示不截断。"""
+        if limit and len(text) > limit:
+            return text[:limit] + "…"
+        return text
+
+    @classmethod
+    def _table_block(cls, table, index: int, max_text_chars: int) -> dict:
+        """表格块摘要：单元格文字网格 + 每格首个 run 的实际字体。"""
+        grid = []
+        fonts = []
+        for row in table.rows:
+            grid.append([
+                cls._truncate(cell.text.strip(), max_text_chars) for cell in row.cells
+            ])
+            row_fonts = []
+            for cell in row.cells:
+                paragraphs = cell.paragraphs
+                if not paragraphs:
+                    row_fonts.append(None)
+                    continue
+                # 空格子没有 run，但仍能按样式解析出「填进去会是什么字体」
+                name, size = cls._effective_font(paragraphs[0])
+                row_fonts.append({
+                    "font_name": name,
+                    "font_size_pt": round(size.pt, 2) if size is not None else None,
+                })
+            fonts.append(row_fonts)
+        return {
+            "type": "table",
+            "index": index,
+            "rows": len(table.rows),
+            "columns": len(table.columns),
+            "grid": grid,
+            "cell_fonts": fonts,
+        }
+
+    def describe_blocks(self, *, include_empty: bool = False,
+                        max_text_chars: int = 200) -> list:
+        """按文档顺序列出正文块（段落与表格），用来定位要改写的位置。
+
+        生成报告时不需要它——按顺序 ``add`` 就行；但填模板必须先把已有文档看清楚。
+
+        段落块给出它在 ``doc.paragraphs`` 里的下标，可直接用于 :meth:`replace_text`
+        对应的工具；表格块给出 ``doc.tables`` 的下标与单元格网格，
+        用来决定往哪个格子填值或贴图。
+
+        :param include_empty: 是否返回空段落，默认否（模板里的留白通常不用处理）。
+        :param max_text_chars: 单段/单格文本的截断长度，默认 200 字符，
+                               避免长文档一次性回传过大。
+        :return: 块列表，段落块形如
+                 ``{"type": "paragraph", "index": 0, "text": "...", "runs": [...]}``，
+                 表格块形如 ``{"type": "table", "index": 0, "grid": [[...]]}``。
+        """
+        blocks = []
+        paragraph_index = 0
+        table_index = 0
+        for item in self.doc.iter_inner_content():
+            if isinstance(item, Table):
+                blocks.append(self._table_block(item, table_index, max_text_chars))
+                table_index += 1
+                continue
+            index = paragraph_index
+            paragraph_index += 1
+            if not include_empty and not item.text.strip():
+                continue
+            blocks.append({
+                "type": "paragraph",
+                "index": index,
+                "text": self._truncate(item.text, max_text_chars),
+                "style": item.style.name if item.style is not None else None,
+                "runs": [self._run_font_info(item, run) for run in item.runs],
+            })
+        return blocks
+
+    @staticmethod
+    def _run_text_spans(paragraph):
+        """把段落的 run 拼成「字符区间 -> run」的映射，用于按字符定位替换范围。"""
+        spans = []
+        offset = 0
+        for run in paragraph.runs:
+            text = run.text
+            spans.append((offset, offset + len(text), run, text))
+            offset += len(text)
+        return spans
+
+    @staticmethod
+    def _locate_offset(spans, position: int):
+        """找出字符位置落在哪个 run，以及它在 run 内的偏移。"""
+        for index, (start, end, _run, _text) in enumerate(spans):
+            if start <= position <= end:
+                return index, position - start
+        last = len(spans) - 1
+        return last, len(spans[last][3])
+
+    @staticmethod
+    def _set_run_text(run, text: str):
+        """只改写 run 里的 ``w:t``，保留字体等其余属性。
+
+        直接给 ``run.text`` 赋值会重建整个 ``w:r``，把制表符、换行等子元素一并丢掉；
+        这里只替换文本节点，``w:tab`` / ``w:br`` 之类的结构得以保留。
+        """
+        element = run._r
+        for existing in element.findall(qn("w:t")):
+            element.remove(existing)
+        node = OxmlElement("w:t")
+        node.set(qn("xml:space"), "preserve")
+        node.text = text
+        element.append(node)
+        return run
+
+    @staticmethod
+    def _highlight_run(run, enabled: bool):
+        """按需把 run 标黄；``enabled`` 为假时不动原有高亮设置。"""
+        if enabled:
+            run.font.highlight_color = WD_COLOR_INDEX.YELLOW
+        return run
+
+    @staticmethod
+    def replace_text(paragraph, old: str, new: str, *, count: int = 1,
+                     highlight: bool = False) -> int:
+        """在已有段落里把 ``old`` 原地替换为 ``new``，**字体字号沿用原处**。
+
+        替换过程不新建 run，只改写原 run 的文本节点，因此填进去的内容自带原位置的
+        字体、字号、加粗等格式——这正是「填完和原文一致」所要求的。Word 常把一句话
+        拆成好几个 run，匹配跨 run 时新文本落在**第一个** run 上，其余 run 里被匹配到
+        的部分清空。
+
+        ``old`` 传空串表示在段尾追加 ``new``，用于「委托代理人身份证号码：____」
+        这类只有标签、值要补在标签后面的填空；模板里的空格子（没有任何 run）
+        也走这条路，此时字体按段落样式解析出来，和邻居保持一致。
+
+        :param paragraph: 目标段落（``docx.text.paragraph.Paragraph``）。
+        :param old: 要被替换掉的原文；空串表示追加到段尾。
+        :param new: 新写入的文本。
+        :param count: 最多替换几处，默认 1；传 0 表示全部替换。
+        :param highlight: 是否把写入 ``new`` 的那个 run 标黄，便于人工复核，默认否。
+        :return: 实际替换的处数。
+        :raises ValueError: 一处都没匹配上（含对空段落替换非空原文）。
+        """
+        spans = WordFormatter._run_text_spans(paragraph)
+        if not spans:
+            if old:
+                raise ValueError(
+                    f"该段落是空的，没有可匹配的文本 {old!r}。"
+                    "往空段落/空格子里填内容请把 old 传空串。"
+                )
+            # 空格子没有 run 可继承格式，退回按段落样式解析出的字体写一个
+            name, size = WordFormatter._effective_font(paragraph)
+            run = paragraph.add_run(new)
+            WordFormatter.set_run_font(
+                run, cn_font=name or DEFAULT_CN_FONT,
+                size=size.pt if size is not None else DEFAULT_BODY_SIZE,
+            )
+            WordFormatter._highlight_run(run, highlight)
+            return 1
+
+        if not old:
+            index = len(spans) - 1
+            run, text = spans[index][2], spans[index][3]
+            WordFormatter._set_run_text(run, text + new)
+            WordFormatter._highlight_run(run, highlight)
+            return 1
+
+        limit = count if count and count > 0 else None
+        replaced = 0
+        while limit is None or replaced < limit:
+            spans = WordFormatter._run_text_spans(paragraph)
+            full_text = "".join(span[3] for span in spans)
+            start = full_text.find(old)
+            if start < 0:
+                break
+            end = start + len(old)
+            first_index, first_offset = WordFormatter._locate_offset(spans, start)
+            last_index, last_offset = WordFormatter._locate_offset(spans, end)
+            if first_index == last_index:
+                text = spans[first_index][3]
+                WordFormatter._set_run_text(
+                    spans[first_index][2],
+                    text[:first_offset] + new + text[last_offset:],
+                )
+            else:
+                WordFormatter._set_run_text(
+                    spans[first_index][2],
+                    spans[first_index][3][:first_offset] + new,
+                )
+                for middle in range(first_index + 1, last_index):
+                    WordFormatter._set_run_text(spans[middle][2], "")
+                WordFormatter._set_run_text(
+                    spans[last_index][2], spans[last_index][3][last_offset:],
+                )
+            WordFormatter._highlight_run(spans[first_index][2], highlight)
+            replaced += 1
+
+        if not replaced:
+            raise ValueError(f"段落里没有找到要替换的文本 {old!r}。")
+        return replaced
+
+    @staticmethod
+    def insert_cell_image(cell, image_path, *, width=None, height=None,
+                          alignment="居中", keep_text: bool = False):
+        """把图片放进表格单元格——「此格附身份证正面」这类版式的正确工具。
+
+        :meth:`insert_img` 只能往正文追加图片，落到不了一个已有的格子里；而身份证、
+        营业执照、印章在表单里都是要「贴进格子」的。
+
+        ``width`` 与 ``height`` 都省略时按图片自身 DPI 使用原始尺寸。
+
+        :param cell: ``docx.table._Cell`` 对象。
+        :param image_path: 图片路径（str/Path），或图片二进制内容（bytes/bytearray）。
+        :param width: 图片宽度，单位 cm，可选。
+        :param height: 图片高度，单位 cm，可选。
+        :param alignment: 单元格内段落对齐方式，默认居中。
+        :param keep_text: 是否保留单元格已有文字，默认否（清空后再贴图，避免挤成一行）。
+        :return: 该单元格。
+        """
+        if width is not None and width <= 0:
+            raise ValueError(f"图片宽度必须大于 0，收到 {width!r}")
+        if height is not None and height <= 0:
+            raise ValueError(f"图片高度必须大于 0，收到 {height!r}")
+
+        if not keep_text:
+            for paragraph in cell.paragraphs:
+                for run in list(paragraph.runs):
+                    run._r.getparent().remove(run._r)
+
+        paragraph = cell.paragraphs[0]
+        paragraph.alignment = WordFormatter.resolve_alignment(alignment, strict=True)
+        paragraph.paragraph_format.line_spacing = 1
+        paragraph.paragraph_format.space_before = Pt(0)
+        paragraph.paragraph_format.space_after = Pt(0)
+
+        run = paragraph.add_run()
+        source, owned = WordFormatter._image_stream(image_path)
+        try:
+            kwargs = {}
+            if width is not None:
+                kwargs["width"] = Cm(width)
+            if height is not None:
+                kwargs["height"] = Cm(height)
+            if not kwargs:
+                kwargs["width"] = Cm(WordFormatter._native_width_cm(source))
+            run.add_picture(source, **kwargs)
+        finally:
+            if owned:
+                source.close()
+        # 被并进来的空段落会白高一截，贴完图整理掉
+        WordFormatter._strip_extra_paragraphs(cell, keep=1)
+        return cell
 
     '''REMOVED_COMPATIBILITY_BLOCK'''
 

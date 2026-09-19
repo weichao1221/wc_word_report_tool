@@ -100,6 +100,19 @@ def _table(session: Session, index: int):
     return tables[resolved]
 
 
+def _paragraph(session: Session, index: int):
+    paragraphs = session.doc.paragraphs
+    if not paragraphs:
+        raise ReportSessionError("文档中还没有正文段落。")
+    resolved = index + len(paragraphs) if index < 0 else index
+    if resolved < 0 or resolved >= len(paragraphs):
+        raise ReportSessionError(
+            f"paragraph_index {index} 超出范围"
+            f"（共 {len(paragraphs)} 段，0~{len(paragraphs) - 1}）"
+        )
+    return paragraphs[resolved]
+
+
 def _resolve_logo(
     session: Session,
     image_path: Optional[str],
@@ -303,8 +316,11 @@ def word_add_heading(
     indent: bool = False,
     alignment: Optional[str] = None,
     line_spacing: float = 1.5,
+    line_spacing_pt: float = 0,
+    left_indent_pt: float = 0,
     space_before: Optional[float] = None,
     space_after: Optional[float] = None,
+    page_break_before: bool = False,
 ) -> Dict[str, Any]:
     """添加标题段落。
 
@@ -319,12 +335,16 @@ def word_add_heading(
     :param line_spacing: 行距倍数，默认 1.5。
     :param space_before: 段前空白（pt）；省略时按字号的 0.5 行计算。
     :param space_after: 段后空白（pt）；省略时按字号的 0.5 行计算。
+    :param page_break_before: 是否在本标题之前分页。模板类文档「一个表单起一页」时用它；
+        该属性在标题已处于页首时自动失效，不会多顶出空白页。
     """
     with _op(doc_id) as session:
         session.formatter.heading(
             text, level=level, font_name=font_name, font_size=font_size,
             bold=bold, indent=indent, line_spacing=line_spacing,
+            line_spacing_pt=line_spacing_pt, left_indent_pt=left_indent_pt,
             alignment=alignment, space_before=space_before, space_after=space_after,
+            page_break_before=page_break_before,
         )
         return _result(session)
 
@@ -338,8 +358,13 @@ def word_add_body(
     bold: bool = False,
     alignment: str = "两端对齐",
     line_spacing: float = 1.5,
+    line_spacing_pt: float = 0,
+    left_indent_pt: float = 0,
     space_before: float = 0,
     space_after: float = 0,
+    page_break_before: bool = False,
+    highlight: bool = False,
+    underline: bool = False,
 ) -> Dict[str, Any]:
     """添加一个正文段落（默认宋体四号、首行缩进 2 字符、两端对齐、1.5 倍行距）。
 
@@ -351,14 +376,27 @@ def word_add_body(
     :param bold: 是否加粗。
     :param alignment: 对齐方式，支持 两端对齐/居中/居左/居右 或 left/center/right/justify。
     :param line_spacing: 行距倍数。
+    :param line_spacing_pt: 行距固定值，单位 pt；给了它覆盖 line_spacing。
+    :param left_indent_pt: 整段左缩进，单位 pt，默认 0。用来还原「整段右移」的表单行
+                          （如「联合体牵头人名称：____（盖单位公章）」），它既不是居中，
+                          也不是首行缩进。
+                            从 PDF 还原版式时用它——PDF 只能量出「相邻行基线差多少 pt」，
+                            换算成倍数要依赖字体自身行高，直接写 pt 才精确。
     :param space_before: 段前空白，单位 pt。
     :param space_after: 段后空白，单位 pt。
+    :param page_break_before: 是否在本段之前分页。
+    :param highlight: 是否黄色高亮，默认否。用于标出由 AI 填写的临时数据。
+    :param underline: 整段是否加下划线，默认否。用于还原模板里的填空线；
+                      只对段落一部分划线时请改用 word_add_body_segments。
     """
     with _op(doc_id) as session:
         session.formatter.body(
             text, font_name=font_name, font_size=font_size, indent=indent,
             bold=bold, alignment=alignment, line_spacing=line_spacing,
+            line_spacing_pt=line_spacing_pt, left_indent_pt=left_indent_pt,
             space_before=space_before, space_after=space_after,
+            page_break_before=page_break_before, highlight=highlight,
+            underline=underline,
         )
         return _result(session)
 
@@ -372,23 +410,73 @@ def word_add_body_list(
     bold: bool = False,
     alignment: str = "两端对齐",
     line_spacing: float = 1.5,
+    line_spacing_pt: float = 0,
+    left_indent_pt: float = 0,
     space_before: float = 0,
     space_after: float = 0,
+    page_break_before: bool = False,
+    highlight: bool = False,
+    underline: bool = False,
 ) -> Dict[str, Any]:
     """批量添加多个正文段落，共用同一套格式参数（长报告建议用它减少调用次数）。
 
     :param doc_id: 会话 id。
     :param texts: 正文段落列表，按顺序逐段写入。
+    :param page_break_before: 只对**第一段**生效，是否在它之前分页。
+    :param highlight: 是否把这几段整体黄色高亮，默认否。
+    :param underline: 是否把这几段整体加下划线，默认否。
     其余参数含义同 word_add_body。
     """
     with _op(doc_id) as session:
-        for text in texts:
+        for index, text in enumerate(texts):
             session.formatter.body(
                 text, font_name=font_name, font_size=font_size, indent=indent,
                 bold=bold, alignment=alignment, line_spacing=line_spacing,
+                line_spacing_pt=line_spacing_pt, left_indent_pt=left_indent_pt,
                 space_before=space_before, space_after=space_after,
+                page_break_before=page_break_before and index == 0,
+                highlight=highlight, underline=underline,
             )
         return _result(session, added=len(texts))
+
+
+def word_add_body_segments(
+    doc_id: str,
+    segments: List[Dict[str, Any]],
+    font_name: str = "宋体",
+    font_size: FontSize = "四号",
+    indent: bool = True,
+    alignment: str = "两端对齐",
+    line_spacing: float = 1.5,
+    line_spacing_pt: float = 0,
+    left_indent_pt: float = 0,
+    page_break_before: bool = False,
+) -> Dict[str, Any]:
+    """写一个「由多段拼接」的正文段落，每段可单独高亮、单独加下划线。
+
+    典型用法是「标签 + 填值」只标记填值部分：
+    `[{"text": "项目名称：", "highlight": false},
+      {"text": "雄安新区示范工程", "highlight": true}]`
+    只把填进去的值标黄，标签保持原样。
+
+    招投标模板里的填空线同理，只画在填进去的值下面：
+    `[{"text": "中国雄安集团生态建设投资有限公司", "underline": true},
+      {"text": "（采购人名称）"}]`
+
+    :param doc_id: 会话 id。
+    :param segments: 片段列表，每项形如
+                     {"text": "…", "highlight": true, "underline": true}；
+                     highlight / underline 都可省略。
+    其余参数含义同 word_add_body。
+    """
+    with _op(doc_id) as session:
+        session.formatter.body_segments(
+            segments, font_name=font_name, font_size=font_size, indent=indent,
+            alignment=alignment, line_spacing=line_spacing,
+            line_spacing_pt=line_spacing_pt, left_indent_pt=left_indent_pt,
+            page_break_before=page_break_before,
+        )
+        return _result(session, segments=len(segments))
 
 
 def word_add_blank_lines(doc_id: str, count: int = 1) -> Dict[str, Any]:
@@ -400,6 +488,19 @@ def word_add_blank_lines(doc_id: str, count: int = 1) -> Dict[str, Any]:
     with _op(doc_id) as session:
         session.formatter.blank_lines(count)
         return _result(session, added=count)
+
+
+def word_add_page_break(doc_id: str, text: str = "") -> Dict[str, Any]:
+    """插入一个分页符（可同时带一段文字），用于「一个表单起一页」这类版式。
+
+    模板类文档的分页通常是固定排版的一部分；只靠内容自然流排的话页数会对不上原稿。
+
+    :param doc_id: 会话 id。
+    :param text: 分页符之后要写的文字，默认空（纯分页）。
+    """
+    with _op(doc_id) as session:
+        session.formatter.add_page_break(text)
+        return _result(session)
 
 
 def word_add_cover_text(
@@ -561,6 +662,7 @@ def word_add_table(
     row_heights: Optional[List[Optional[float]]] = None,
     table_width_cm: Optional[float] = None,
     cell_font_names: Optional[List[Optional[List[Optional[str]]]]] = None,
+    cell_highlights: Optional[List[Optional[List[Optional[bool]]]]] = None,
 ) -> Dict[str, Any]:
     """在末尾追加一个带表头的表格。
 
@@ -581,6 +683,8 @@ def word_add_table(
     :param table_width_cm: 表格总宽度，单位 cm，可选。
     :param cell_font_names: 逐单元格中文字体名的二维列表（含表头行），可选；
                             未覆盖的位置回落到 font_name。
+    :param cell_highlights: 逐单元格「是否黄色高亮」的二维布尔列表（含表头行），可选。
+                            用来标出由 AI 填写的临时数据，便于人工复核。
     """
     with _op(doc_id) as session:
         table = session.formatter.add_table(
@@ -589,6 +693,7 @@ def word_add_table(
             border_color=border_color, border_size=border_size,
             merges=merges, row_heights=row_heights,
             table_width_cm=table_width_cm, cell_font_names=cell_font_names,
+            cell_highlights=cell_highlights,
         )
         return _result(
             session,
@@ -631,6 +736,7 @@ def word_format_cell(
     bold: bool = False,
     alignment: str = "居中",
     line_spacing: float = 1.25,
+    highlight: bool = False,
 ) -> Dict[str, Any]:
     """改写指定表格单元格的内容与格式。
 
@@ -655,6 +761,7 @@ def word_format_cell(
         WordFormatter.set_cell(
             table.cell(row, col), text, font_name=font_name, font_size=font_size,
             bold=bold, alignment=alignment, line_spacing=line_spacing,
+            highlight=highlight,
         )
         return _result(session, table_index=table_index, row=row, col=col)
 
@@ -677,6 +784,153 @@ def word_set_table_borders(
             _table(session, table_index), color=color, size=size,
         )
         return _result(session, table_index=table_index)
+
+
+# ====================================================================
+# Layer 2 · 模板填充（在已有文档上原位改写）
+# ====================================================================
+
+
+def word_list_blocks(
+    doc_id: str,
+    include_empty: bool = False,
+    max_text_chars: int = 200,
+) -> Dict[str, Any]:
+    """列出文档的正文块（段落 / 表格），用来定位占位符在哪一段、哪一格。
+
+    生成报告时不需要它——按顺序 add 就行；但**填模板**必须先把已有文档看清楚：
+    段落块返回它在 ``doc.paragraphs`` 里的下标与逐 run 的字体字号，表格块返回
+    ``doc.tables`` 的下标与单元格文字网格，两者分别对应 word_replace_text 的
+    ``paragraph_index`` 和 ``table_index`` / ``row`` / ``col``。
+
+    :param doc_id: 会话 id。
+    :param include_empty: 是否连空段落一起返回，默认否（模板留白通常不用管）。
+    :param max_text_chars: 单段/单格文本的截断长度，默认 200，防止长文档回传过大。
+    """
+    with _op(doc_id) as session:
+        blocks = session.formatter.describe_blocks(
+            include_empty=include_empty, max_text_chars=max_text_chars,
+        )
+        return _result(session, blocks=blocks, block_count=len(blocks))
+
+
+def word_replace_text(
+    doc_id: str,
+    old: str,
+    new: str,
+    paragraph_index: Optional[int] = None,
+    table_index: Optional[int] = None,
+    row: Optional[int] = None,
+    col: Optional[int] = None,
+    count: int = 1,
+    highlight: bool = False,
+) -> Dict[str, Any]:
+    """把已有内容里的 ``old`` 原位替换为 ``new``，**格式沿用原处**。
+
+    这是填模板的主工具：它只改写原有 run 的文本，不新建段落，所以填完的字体、字号、
+    加粗与原文一致。用 ``word_add_body`` 之类的追加型工具会把内容写到文档末尾，
+    填模板时用错位置就全乱了。
+
+    定位方式二选一：
+
+    * ``paragraph_index``：正文段落，下标取自 word_list_blocks 段落块的 ``index``；
+    * ``table_index`` + ``row`` + ``col``：表格单元格，坐标取自同一份 blocks。
+
+    ``old`` 传空串表示在段尾追加 ``new``，用于「委托代理人身份证号码：____」这类
+    只有标签、值要补在标签后面的填空。
+
+    :param doc_id: 会话 id。
+    :param old: 要被替换掉的原文；空串表示追加到段尾。
+    :param new: 新写入的文本。
+    :param paragraph_index: 正文段落下标，支持负数（-1 表示最后一段）；与表格坐标二选一。
+    :param table_index: 表格下标，-1 表示最后一个表格；须与 row/col 同时给出。
+    :param row: 单元格行号，从 0 开始。
+    :param col: 单元格列号，从 0 开始。
+    :param count: 最多替换几处，默认 1；传 0 表示全部替换。
+    :param highlight: 是否把填进去的内容标黄，便于人工复核，默认否。
+    """
+    with _op(doc_id) as session:
+        if paragraph_index is not None:
+            paragraphs = [_paragraph(session, paragraph_index)]
+            location = {"paragraph_index": paragraph_index}
+        elif table_index is not None and row is not None and col is not None:
+            table = _table(session, table_index)
+            row_count, col_count = len(table.rows), len(table.columns)
+            if row < 0 or row >= row_count or col < 0 or col >= col_count:
+                raise ReportSessionError(
+                    f"单元格 ({row}, {col}) 超出范围（该表共 {row_count} 行 × {col_count} 列）。"
+                )
+            paragraphs = list(table.cell(row, col).paragraphs)
+            location = {"table_index": table_index, "row": row, "col": col}
+        else:
+            raise ReportSessionError(
+                "需要指定位置：paragraph_index，或同时给 table_index / row / col。"
+                "可先用 word_list_blocks 查看文档里有哪些段落和单元格。"
+            )
+
+        if old:
+            target = next((item for item in paragraphs if old in item.text), None)
+        else:
+            target = paragraphs[0] if paragraphs else None
+        if target is None:
+            raise ReportSessionError(
+                f"指定位置里没有找到 {old!r}。请先用 word_list_blocks 核对原文"
+                "（Word 常把一句话拆成多个 run，这里按整段文本匹配，不受拆分影响）。"
+            )
+        replaced = WordFormatter.replace_text(
+            target, old, new, count=count, highlight=highlight,
+        )
+        return _result(session, replaced=replaced, old=old, new=new, **location)
+
+
+def word_insert_cell_image(
+    doc_id: str,
+    row: int,
+    col: int,
+    table_index: int = -1,
+    image_path: Optional[str] = None,
+    image_base64: Optional[str] = None,
+    width_cm: Optional[float] = None,
+    height_cm: Optional[float] = None,
+    alignment: str = "居中",
+    keep_text: bool = False,
+) -> Dict[str, Any]:
+    """把图片放进指定表格单元格（身份证、营业执照、印章这类「贴格子」场景）。
+
+    ``word_insert_image`` 只能把图片追加到正文，落不进一个已有的格子；而表单里的证件照
+    恰恰要贴在「此格附身份证正面」那个格子里，所以需要这个工具。
+    ``width_cm`` / ``height_cm`` 都省略时按图片自身 DPI 使用原始尺寸。
+
+    :param doc_id: 会话 id。
+    :param row: 单元格行号，从 0 开始。
+    :param col: 单元格列号，从 0 开始。
+    :param table_index: 表格下标，默认 -1 表示文档中最后一个表格。
+    :param image_path: 图片路径（与 image_base64 二选一）。
+    :param image_base64: 图片的 base64，支持裸串或 data:image/png;base64,... 形式。
+    :param width_cm: 图片宽度，单位 cm，可选。
+    :param height_cm: 图片高度，单位 cm，可选。
+    :param alignment: 单元格内对齐方式，默认居中。
+    :param keep_text: 是否保留格子里已有的文字，默认否（清空后再贴图）。
+    """
+    with _op(doc_id) as session:
+        table = _table(session, table_index)
+        row_count, col_count = len(table.rows), len(table.columns)
+        if row < 0 or row >= row_count or col < 0 or col >= col_count:
+            raise ReportSessionError(
+                f"单元格 ({row}, {col}) 超出范围（该表共 {row_count} 行 × {col_count} 列）。"
+            )
+        path = materialize_image(
+            session, image_path=image_path, image_base64=image_base64,
+            label="单元格图片",
+        )
+        WordFormatter.insert_cell_image(
+            table.cell(row, col), str(path), width=width_cm, height=height_cm,
+            alignment=alignment, keep_text=keep_text,
+        )
+        return _result(
+            session, table_index=table_index, row=row, col=col,
+            width_cm=width_cm, height_cm=height_cm,
+        )
 
 
 # ====================================================================
@@ -1467,7 +1721,9 @@ TOOLS = (
     word_add_heading,
     word_add_body,
     word_add_body_list,
+    word_add_body_segments,
     word_add_blank_lines,
+    word_add_page_break,
     word_add_cover_text,
     word_add_right_text,
     word_add_date,
@@ -1477,6 +1733,10 @@ TOOLS = (
     word_merge_cells,
     word_format_cell,
     word_set_table_borders,
+    # Layer 2 · 模板填充
+    word_list_blocks,
+    word_replace_text,
+    word_insert_cell_image,
     # Layer 2 · 页眉页脚
     word_set_header,
     word_set_footer,

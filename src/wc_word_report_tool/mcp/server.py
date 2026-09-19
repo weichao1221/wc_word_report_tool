@@ -27,6 +27,20 @@ INSTRUCTIONS = """中文 Word 报告编制工具。用 python-docx 生成符合�
 3. 用 `word_set_page_numbers` 设置页码，`word_set_header` / `word_set_footer` 设置页眉页脚
 4. `word_save_report` 落盘
 
+## 填模板（在已有文档里补内容）
+
+上面的流程是「从空白开始、按顺序追加」；如果要往**一份现成的 .docx**（招投标文件、
+表单）里填空，走另一条路，两者不要混：
+
+1. `word_open_report` 打开模板 → `word_list_blocks` 看清有哪些段落和单元格
+2. 文本占位用 `word_replace_text`（给 `paragraph_index`，或 `table_index`/`row`/`col`）。
+   它只改写原有 run 的文本，字体字号自动沿用原文，**不需要你重新指定格式**
+3. 证件照这类要贴进格子的图片用 `word_insert_cell_image`
+4. `word_save_report` 存到目标路径（建议传绝对路径）
+
+注意：`word_add_body` / `word_add_body_list` / `word_insert_image` 都是**往文档末尾追加**，
+在模板上误用会把内容写到最后一页，而不是填进占位处。
+
 ## 重要约定
 
 - **顺序即文档顺序**：工具按调用顺序追加内容，请按报告的阅读顺序调用。

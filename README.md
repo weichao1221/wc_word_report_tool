@@ -231,6 +231,54 @@ formatter.add_table(headers=["A"], rows=[["1", "2"]])                    # Value
 merges=[(1, 2, 1, 2)]        # (row, col, rowspan, colspan)
 ```
 
+### 模板填充
+
+前面所有 `body()` / `add_table()` 都是**往文档末尾追加**，适合从空白生成报告；
+但招投标文件、各类表单是「拿一份现成的 `.docx`，把里面的空填上」。
+下面三个方法补的就是这条缺失的路：先看清已有内容，再**就地改写**，且格式沿用原处。
+
+| 方法 | 用途 |
+|------|------|
+| `describe_blocks(*, include_empty, max_text_chars)` | 列出正文块（段落 / 表格）及下标、文本、**实际生效**的字体字号 |
+| `replace_text(paragraph, old, new, *, count, highlight)` | 在已有段落里原位替换，**沿用原 run 的字体字号** |
+| `insert_cell_image(cell, image_path, *, width, height, alignment, keep_text)` | 把图片贴进表格单元格（证件照、印章） |
+
+```python
+from docx import Document
+from wc_word_report_tool import WordFormatter
+
+doc = Document("投标文件格式.docx")
+formatter = WordFormatter(doc)
+
+# 1. 先看清有哪些段落、哪些格子
+for block in formatter.describe_blocks():
+    if block["type"] == "paragraph":
+        print(block["index"], block["text"], block["runs"][0]["font_name"])
+    else:
+        print(block["index"], block["grid"])
+
+# 2. 文本占位原地替换：填完还是原文的字体字号
+formatter.replace_text(doc.paragraphs[37], "标段名称：", "标段名称：一标段")
+# old 传空串 = 追加到段尾，用于「身份证号码：____」这种标签后补值
+formatter.replace_text(doc.paragraphs[47], "", "130633199301125473")
+
+# 3. 证件照贴进「此格附身份证正面」那一格
+formatter.insert_cell_image(doc.tables[1].cell(1, 0), "id_front.jpg", width=7)
+
+doc.save("投标文件格式-已填写.docx")
+```
+
+**为什么必须原位替换**：`replace_text` 不新建 run，只改写原 run 的文本节点，
+所以填进去的内容自带原位置的字体、字号、加粗。若改用 `body()` 重新写一遍，
+字号要自己猜，段落位置也会跑到文档末尾。
+
+**跨 run 匹配**：Word 常把一句话拆成好几个 run（改过几次字体就会这样），
+`replace_text` 按整段文本匹配，不受拆分影响；匹配跨 run 时新文本落在**第一个** run 上。
+
+**字体回落**：模板里的 run 经常一个字体属性都不写、全靠样式继承，
+`describe_blocks()` 会按 `run -> 段落样式链 -> docDefaults` 逐层回落，
+返回真正生效的字体字号，而不是一片 `None`。
+
 ### 页眉页脚
 
 | 方法 | 用途 |
@@ -397,6 +445,58 @@ formatter.heading("1. 一级标题")
 
 ## 版本说明
 
+### v0.7.4
+
+补上「**填模板**」这条缺失的路。此前所有接口都是「从空白文档按顺序追加」，适合生成报告；
+而招投标文件、各类表单是「拿一份现成的 `.docx`，把里面的空填上」——用追加型接口
+填模板，内容会跑到文档最后一页，而不是填进占位处。
+
+- **`describe_blocks(*, include_empty, max_text_chars)`**：按文档顺序列出正文块（段落与表格），
+  段落给 `doc.paragraphs` 下标 + 逐 run 文本，表格给 `doc.tables` 下标 + 单元格网格。
+  字体按 `run -> 段落样式链 -> docDefaults` 逐层回落取**实际生效值**——
+  模板里的 run 常常一个字体属性都不写、全靠样式继承，只读 run 会得到一片 `None`，
+  AI 就会以为「原文没字体」而自己指定一个，反而破坏一致性。
+- **`replace_text(paragraph, old, new, *, count, highlight)`**：在已有段落里原位替换，
+  只改写原 run 的文本节点、**不新建 run**，因此填进去的内容自带原位置的字体、字号、加粗。
+  Word 常把一句话拆成多个 run（改过几次字体就会这样），匹配按整段文本进行、不受拆分影响。
+  `old` 传空串表示追加到段尾，用于「委托代理人身份证号码：____」这类标签后补值。
+- **`insert_cell_image(cell, image_path, *, width, height, alignment, keep_text)`**：
+  把图片贴进表格单元格。`insert_img()` 只能往正文追加，落不进已有格子，
+  而身份证、营业执照、印章在表单里恰恰是「贴进格子」的。
+- 对应 MCP 工具：`word_list_blocks`、`word_replace_text`、`word_insert_cell_image`
+  （共 48 个工具）。`word_replace_text` 同时支持 `paragraph_index` 与
+  `table_index`/`row`/`col` 两种定位。
+
+### v0.7.3
+
+按「用 PyMuPDF 读出每段格式参数 → 通过 MCP 还原 Word」这条路的缺口补齐，
+重点是**下划线（填空线）**和**段落级精确版式**。
+
+- **下划线**：`body()` 增加 `underline`（整段），`body_segments()` 的每个片段支持
+  `underline` 字段。招投标模板里的填空线只画在填进去的值下面——
+  `中国雄安集团生态建设投资有限公司`（因在 PDF 里是矢量线段，纯文本提取永远看不到）。
+  整段划线会把 `（采购人名称）` 这类占位标签也划上，所以必须支持逐片段下发。
+- **行距固定值 `line_spacing_pt`**：PDF 只能量出「相邻两行基线差多少 pt」这一个事实，
+  换算成行距倍数要依赖字体自身的行高（随字体而变），直接写 pt 才精确。
+  传它时 python-docx 写 `w:lineRule="exact"`，覆盖 `line_spacing` 倍数。
+  实测换成固定值后，19 页的文档页数从对不上变成**逐页页数完全一致**。
+- **整段左缩进 `left_indent_pt`**：还原「整段右移」的表单行
+  （如 `联合体牵头人名称：____（盖单位公章）`、`____年____月____日`）。
+  它既不是居中，也不是 2 字符首行缩进，原先三种属性都表达不了，只能被挤到左边界。
+- 以上三个参数同时加到 `word_add_heading` / `word_add_body` / `word_add_body_list` /
+  `word_add_body_segments`，普通方法与 MCP 工具保持一致（由 `tests/test_mcp_formatter_sync.py` 守着）。
+
+### v0.7.2
+
+- **修复表格列宽/行高在 Word 里不生效的问题**。原先只写 `w:tcW`，而 python-docx 建表时
+  写的是 `w:tblW type="auto"` 且不设 `w:tblLayout`，Word 会按自动布局重排列宽，把算好的
+  列宽整个冲掉。现在新增 `set_table_columns()` 一次写全三处并锁定布局：
+  `w:tblGrid/w:gridCol`（布局基准网格）+ 每个单元格 `w:tcW`（合并格写跨列合计宽度）
+  + `w:tblW type="dxa"` 与 `w:tblLayout type="fixed"`。
+- `add_table()`：列宽改到**合并之后**再写（合并格需要先有 `gridSpan` 才知道跨几列）；
+  `row_heights` 改到**最后**再写（合并会重建 `tr`，先设会被丢掉）。
+- 新增 `set_table_columns(table, col_widths, *, fixed_layout=True)`。
+
 ### v0.7.1
 
 - **`add_table()` 增加表格参数的自洽性校验**：`headers` / `rows` / `col_widths` / `row_heights`
@@ -545,6 +645,19 @@ word_set_section_page         → 横向插页按节改纸张方向与边距
 word_save_report              → 落盘，返回绝对路径
 ```
 
+**填模板另有一条路**（往现成的 .docx 里补内容），不要和上面的追加流程混用：
+
+```
+word_open_report              → 打开模板，拿到 doc_id
+word_list_blocks              → 看清有哪些段落、哪些单元格、原文什么字体
+word_replace_text             → 文本占位原地替换（给 paragraph_index 或 table_index/row/col）
+word_insert_cell_image        → 证件照贴进表格单元格
+word_save_report              → 存到目标路径（建议传绝对路径）
+```
+
+`word_add_body` / `word_add_body_list` / `word_insert_image` 都是**往文档末尾追加**，
+在模板上误用会把内容写到最后一页，而不是填进占位处。
+
 ### 工具清单
 
 | 分组 | 工具 |
@@ -553,6 +666,7 @@ word_save_report              → 落盘，返回绝对路径
 | 文档级设置 | `word_set_default_font`、`word_set_page_margins`、`word_set_document_language` |
 | 段落与标题 | `word_add_heading`、`word_add_body`、`word_add_body_list`、`word_add_blank_lines`、`word_add_cover_text`、`word_add_right_text`、`word_add_date`、`word_insert_image` |
 | 表格 | `word_add_table`、`word_merge_cells`、`word_format_cell`、`word_set_table_borders` |
+| 模板填充 | `word_list_blocks`、`word_replace_text`、`word_insert_cell_image` |
 | 页眉页脚 | `word_set_header`、`word_set_footer`、`word_set_header_parts`、`word_set_footer_parts`、`word_set_different_first_page`、`word_set_different_odd_even`、`word_clear_header_footer`、`word_set_header_image` |
 | 节与页码 | `word_insert_section`、`word_set_section_page`、`word_set_page_numbers`、`word_restart_page_numbering`、`word_set_page_number_start`、`word_set_page_number_format` |
 | 目录与样式 | `word_add_toc`、`word_set_toc_level_style`、`word_set_paragraph_style`、`word_add_custom_heading` |

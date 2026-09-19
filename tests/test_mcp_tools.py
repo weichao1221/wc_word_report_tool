@@ -4,11 +4,14 @@
 协议层的冒烟测试见 tests/test_mcp_server.py。
 """
 
+import base64
 from pathlib import Path
 from zipfile import ZipFile
 
 import pytest
+from docx import Document
 
+from wc_word_report_tool import WordFormatter
 from wc_word_report_tool.mcp import tools
 from wc_word_report_tool.mcp.errors import ToolError
 from wc_word_report_tool.mcp.session import ReportSessionError, SessionStore
@@ -851,3 +854,176 @@ def test_failed_add_table_does_not_corrupt_the_session():
 
     tools.word_add_table(doc_id, headers=["A", "B"], rows=[["1", "2"]])
     assert tools.word_describe_report(doc_id)["tables"] == 1
+
+
+def test_add_page_break_tool():
+    doc_id = tools.word_create_report()["doc_id"]
+    tools.word_add_body(doc_id, "第一页")
+    tools.word_add_page_break(doc_id)
+    tools.word_add_body(doc_id, "第二页")
+    saved = tools.word_save_report(doc_id, "page-break.docx")
+
+    assert 'w:type="page"' in _read_zip_xml(Path(saved["saved_to"]), "word/document.xml")
+
+
+def test_heading_page_break_before_only_on_first_body_paragraph():
+    doc_id = tools.word_create_report()["doc_id"]
+
+    tools.word_add_heading(doc_id, "新页标题", page_break_before=True)
+    tools.word_add_body_list(doc_id, ["第一段", "第二段"], page_break_before=True)
+    saved = tools.word_save_report(doc_id, "pbb-list.docx")
+
+    document_xml = _read_zip_xml(Path(saved["saved_to"]), "word/document.xml")
+    # 标题 1 处 + 正文首段 1 处，第二段不分页
+    assert document_xml.count("<w:pageBreakBefore/>") == 2
+
+
+def test_add_body_list_highlights_ai_filled_data():
+    doc_id = tools.word_create_report()["doc_id"]
+
+    tools.word_add_body_list(doc_id, ["项目名称：雄安新区示范工程"], highlight=True)
+    saved = tools.word_save_report(doc_id, "hl-body.docx")
+
+    assert 'w:highlight w:val="yellow"' in _read_zip_xml(
+        Path(saved["saved_to"]), "word/document.xml")
+
+
+def test_add_table_cell_highlights_tool():
+    doc_id = tools.word_create_report()["doc_id"]
+
+    tools.word_add_table(
+        doc_id, headers=["项目", "填值"], rows=[["单位名称", "某某公司"]],
+        cell_highlights=[[False, False], [False, True]],
+    )
+    saved = tools.word_save_report(doc_id, "hl-table.docx")
+
+    assert _read_zip_xml(Path(saved["saved_to"]), "word/document.xml").count(
+        'w:highlight w:val="yellow"') == 1
+
+
+# ====================================================================
+# 模板填充
+# ====================================================================
+
+
+def _make_template(tmp_path: Path) -> Path:
+    """造一份「自带字体、留着空」的小模板，模拟招投标文件。"""
+    document = Document()
+    par = document.add_paragraph()
+    WordFormatter.set_run_font(
+        par.add_run("标段名称："), cn_font="仿宋_GB2312", size="三号")
+    table = document.add_table(rows=1, cols=2)
+    WordFormatter.set_cell(table.cell(0, 0), "费率：")
+    WordFormatter.set_cell(table.cell(0, 1), "%")
+    source = tmp_path / "template.docx"
+    document.save(str(source))
+    return source
+
+
+def test_list_blocks_reports_paragraph_indexes_and_table_grid(tmp_path):
+    source = _make_template(tmp_path)
+    doc_id = tools.word_open_report(str(source))["doc_id"]
+
+    result = tools.word_list_blocks(doc_id)
+
+    paragraphs = [b for b in result["blocks"] if b["type"] == "paragraph"]
+    tables = [b for b in result["blocks"] if b["type"] == "table"]
+    assert paragraphs[0]["index"] == 0
+    assert paragraphs[0]["text"] == "标段名称："
+    assert paragraphs[0]["runs"][0]["font_name"] == "仿宋_GB2312"
+    assert tables[0]["index"] == 0
+    assert tables[0]["grid"] == [["费率：", "%"]]
+
+
+def test_replace_text_in_paragraph_keeps_original_format(tmp_path):
+    source = _make_template(tmp_path)
+    doc_id = tools.word_open_report(str(source))["doc_id"]
+
+    result = tools.word_replace_text(
+        doc_id, "标段名称：", "标段名称：一标段", paragraph_index=0)
+
+    assert result["replaced"] == 1
+    saved = tools.word_save_report(doc_id, "filled.docx")
+    xml = _read_zip_xml(Path(saved["saved_to"]), "word/document.xml")
+    assert "标段名称：一标段" in xml
+    assert 'w:eastAsia="仿宋_GB2312"' in xml
+
+
+def test_replace_text_works_inside_table_cell(tmp_path):
+    source = _make_template(tmp_path)
+    doc_id = tools.word_open_report(str(source))["doc_id"]
+
+    result = tools.word_replace_text(doc_id, "%", "89%", table_index=0, row=0, col=1)
+
+    assert (result["row"], result["col"]) == (0, 1)
+    saved = tools.word_save_report(doc_id, "cell.docx")
+    assert "89%" in _read_zip_xml(Path(saved["saved_to"]), "word/document.xml")
+
+
+def test_replace_text_can_append_after_label(tmp_path):
+    source = _make_template(tmp_path)
+    doc_id = tools.word_open_report(str(source))["doc_id"]
+
+    tools.word_replace_text(doc_id, "", "一标段", paragraph_index=0)
+
+    assert "标段名称：一标段" in tools.word_list_blocks(doc_id)["blocks"][0]["text"]
+
+
+def test_replace_text_requires_a_location(tmp_path):
+    source = _make_template(tmp_path)
+    doc_id = tools.word_open_report(str(source))["doc_id"]
+
+    with pytest.raises(ToolError) as excinfo:
+        tools.word_replace_text(doc_id, "标段名称：", "x")
+
+    assert "word_list_blocks" in str(excinfo.value)
+
+
+def test_replace_text_missing_source_text_gives_actionable_error(tmp_path):
+    source = _make_template(tmp_path)
+    doc_id = tools.word_open_report(str(source))["doc_id"]
+
+    with pytest.raises(ToolError) as excinfo:
+        tools.word_replace_text(doc_id, "不存在的占位", "x", paragraph_index=0)
+
+    assert "word_list_blocks" in str(excinfo.value)
+
+
+def test_replace_text_rejects_out_of_range_paragraph(tmp_path):
+    source = _make_template(tmp_path)
+    doc_id = tools.word_open_report(str(source))["doc_id"]
+
+    with pytest.raises(ToolError) as excinfo:
+        tools.word_replace_text(doc_id, "标段名称：", "x", paragraph_index=99)
+
+    assert "paragraph_index" in str(excinfo.value)
+
+
+def test_insert_cell_image_puts_picture_into_cell(tmp_path):
+    source = _make_template(tmp_path)
+    png = tmp_path / "id.png"
+    png.write_bytes(base64.b64decode(TEST_PNG_B64))
+    doc_id = tools.word_open_report(str(source))["doc_id"]
+
+    result = tools.word_insert_cell_image(
+        doc_id, row=0, col=0, table_index=0, image_path=str(png), width_cm=5,
+    )
+
+    assert (result["table_index"], result["row"], result["col"]) == (0, 0, 0)
+    saved = tools.word_save_report(doc_id, "cell-image.docx")
+    path = Path(saved["saved_to"])
+    assert "<w:drawing>" in _read_zip_xml(path, "word/document.xml")
+    assert any(name.startswith("word/media/") for name in _zip_names(path))
+
+
+def test_insert_cell_image_rejects_out_of_range_cell(tmp_path):
+    source = _make_template(tmp_path)
+    png = tmp_path / "id2.png"
+    png.write_bytes(base64.b64decode(TEST_PNG_B64))
+    doc_id = tools.word_open_report(str(source))["doc_id"]
+
+    with pytest.raises(ToolError) as excinfo:
+        tools.word_insert_cell_image(
+            doc_id, row=9, col=0, table_index=0, image_path=str(png))
+
+    assert "超出范围" in str(excinfo.value)

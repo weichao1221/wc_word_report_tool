@@ -1131,3 +1131,553 @@ def test_add_table_error_does_not_leave_a_stray_table():
         )
 
     assert len(doc.tables) == 0
+
+
+# ====================================================================
+# 表格列宽/行高：光写 tcW 不够，Word 会按自动布局把列宽冲掉
+# ====================================================================
+
+def _tbl_xml(path, index=0):
+    from xml.etree import ElementTree as ET
+    W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+    with ZipFile(path) as zf:
+        root = ET.fromstring(zf.read("word/document.xml"))
+    return list(root.iter(f"{W}tbl"))[index], W
+
+
+def test_add_table_locks_fixed_layout_and_writes_tblw(tmp_path):
+    """只写 tcW 时 Word 会按 auto 布局重排，列宽白设；必须同时锁 fixed + 写 tblW。"""
+    doc = Document()
+    WordFormatter(doc).add_table(
+        headers=["A", "B", "C", "D"], rows=[["1", "2", "3", "4"]],
+        col_widths=[2.5, 4.0, 3.0, 5.0],
+    )
+    out = tmp_path / "layout.docx"
+    doc.save(out)
+
+    tbl, W = _tbl_xml(out)
+    tbl_w = tbl.find(f"{W}tblPr/{W}tblW")
+    layout = tbl.find(f"{W}tblPr/{W}tblLayout")
+
+    assert tbl_w.get(f"{W}type") == "dxa"
+    # 2.5 + 4.0 + 3.0 + 5.0 = 14.5cm
+    assert int(tbl_w.get(f"{W}w")) == pytest.approx(14.5 * 566.929, abs=2)
+    assert layout.get(f"{W}type") == "fixed"
+    grid = [int(g.get(f"{W}w")) for g in tbl.iter(f"{W}gridCol")]
+    assert [round(v / 566.929, 1) for v in grid] == [2.5, 4.0, 3.0, 5.0]
+
+
+def test_add_table_writes_per_cell_width(tmp_path):
+    doc = Document()
+    WordFormatter(doc).add_table(
+        headers=["A", "B", "C"], rows=[["1", "2", "3"]],
+        col_widths=[2.0, 6.0, 4.0],
+    )
+    out = tmp_path / "cells.docx"
+    doc.save(out)
+
+    tbl, W = _tbl_xml(out)
+    first = next(tbl.iter(f"{W}tr"))
+    widths = [round(int(tc.find(f"{W}tcPr/{W}tcW").get(f"{W}w")) / 566.929, 1)
+              for tc in first.findall(f"{W}tc")]
+    assert widths == [2.0, 6.0, 4.0]
+
+
+def test_merged_cell_gets_summed_width(tmp_path):
+    """合并单元格要写它跨越列的合计宽度，否则 Word 会当成单列宽。"""
+    doc = Document()
+    WordFormatter(doc).add_table(
+        headers=["A", "B", "C", "D"], rows=[["1", "2", "3", "4"]],
+        col_widths=[1.0, 2.0, 3.0, 4.0],
+        merges=[{"row": 1, "col": 1, "colspan": 3}],
+    )
+    out = tmp_path / "merged-width.docx"
+    doc.save(out)
+
+    tbl, W = _tbl_xml(out)
+    second = list(tbl.iter(f"{W}tr"))[1]
+    merged = second.findall(f"{W}tc")[1]
+    assert int(merged.find(f"{W}tcPr/{W}tcW").get(f"{W}w")) == pytest.approx(
+        9.0 * 566.929, abs=2)          # 2+3+4
+    assert merged.find(f"{W}tcPr/{W}gridSpan").get(f"{W}val") == "3"
+
+
+def test_add_table_writes_row_heights(tmp_path):
+    doc = Document()
+    WordFormatter(doc).add_table(
+        headers=["A"], rows=[["1"], ["2"]], row_heights=[1.5, 0.8, 0.8],
+    )
+    out = tmp_path / "row-heights.docx"
+    doc.save(out)
+
+    tbl, W = _tbl_xml(out)
+    heights = []
+    for tr in tbl.iter(f"{W}tr"):
+        h = tr.find(f"{W}trPr/{W}trHeight")
+        heights.append(round(int(h.get(f"{W}val")) / 566.929, 2))
+    assert heights == [1.5, 0.8, 0.8]
+
+
+def test_set_table_columns_rejects_bad_widths():
+    doc = Document()
+    table = doc.add_table(rows=1, cols=2)
+
+    with pytest.raises(ValueError, match="col_widths 不能为空"):
+        WordFormatter.set_table_columns(table, [])
+    with pytest.raises(ValueError, match="列宽必须全部大于 0"):
+        WordFormatter.set_table_columns(table, [2.0, 0])
+
+
+def test_add_page_break_writes_page_break(tmp_path):
+    """模板类文档「一个表单起一页」，漏掉分页符页序就全错。"""
+    doc = Document()
+    formatter = WordFormatter(doc)
+    formatter.body("第一页内容")
+    formatter.add_page_break()
+    formatter.body("第二页内容")
+    out = tmp_path / "page-break.docx"
+    doc.save(out)
+
+    document_xml = _read_zip_xml(out, "word/document.xml")
+    assert 'w:type="page"' in document_xml
+    assert document_xml.index("第一页内容") < document_xml.index('w:type="page"')
+    assert document_xml.index('w:type="page"') < document_xml.index("第二页内容")
+
+
+def test_add_page_break_can_carry_text(tmp_path):
+    doc = Document()
+    WordFormatter(doc).add_page_break("新页首行")
+    out = tmp_path / "page-break-text.docx"
+    doc.save(out)
+
+    assert 'w:type="page"' in _read_zip_xml(out, "word/document.xml")
+    assert "新页首行" in _read_zip_xml(out, "word/document.xml")
+
+
+def test_heading_and_body_support_page_break_before(tmp_path):
+    """pageBreakBefore 在段落已处于页首时自动失效，比插独立分页段落安全。"""
+    doc = Document()
+    formatter = WordFormatter(doc)
+    formatter.body("第一页")
+    formatter.heading("新页标题", level=1, page_break_before=True)
+    formatter.body("接在标题后", page_break_before=True)
+    out = tmp_path / "pbb.docx"
+    doc.save(out)
+
+    document_xml = _read_zip_xml(out, "word/document.xml")
+    assert document_xml.count("<w:pageBreakBefore/>") == 2
+
+
+def test_page_break_before_defaults_off(tmp_path):
+    doc = Document()
+    WordFormatter(doc).body("普通段落")
+    out = tmp_path / "no-pbb.docx"
+    doc.save(out)
+
+    assert "pageBreakBefore" not in _read_zip_xml(out, "word/document.xml")
+
+
+# ====================================================================
+# 黄色高亮：标出由 AI 填写的临时数据
+# ====================================================================
+
+def test_body_supports_yellow_highlight(tmp_path):
+    doc = Document()
+    WordFormatter(doc).body("AI 填的临时数据", highlight=True)
+    out = tmp_path / "hl.docx"
+    doc.save(out)
+
+    assert 'w:highlight w:val="yellow"' in _read_zip_xml(out, "word/document.xml")
+
+
+def test_set_cell_supports_highlight(tmp_path):
+    doc = Document()
+    table = doc.add_table(rows=1, cols=1)
+    WordFormatter.set_cell(table.cell(0, 0), "填值", highlight=True)
+    out = tmp_path / "hl-cell.docx"
+    doc.save(out)
+
+    assert 'w:highlight w:val="yellow"' in _read_zip_xml(out, "word/document.xml")
+
+
+def test_add_table_supports_per_cell_highlights(tmp_path):
+    doc = Document()
+    WordFormatter(doc).add_table(
+        headers=["姓名", "填值"],
+        rows=[["张三", ""], ["李四", ""]],
+        cell_highlights=[[False, False], [False, True], [False, True]],
+    )
+    out = tmp_path / "hl-table.docx"
+    doc.save(out)
+
+    document_xml = _read_zip_xml(out, "word/document.xml")
+    # 表头与第一行的第二格不高亮，后两行第二格高亮 => 2 处
+    assert document_xml.count('w:highlight w:val="yellow"') == 2
+
+
+def test_body_segments_highlights_only_filled_value(tmp_path):
+    """只该高亮 AI 填的值，标签保持原样。"""
+    doc = Document()
+    WordFormatter(doc).body_segments(
+        [("项目名称：", False), ("雄安新区示范工程", True)],
+    )
+    out = tmp_path / "segments.docx"
+    doc.save(out)
+
+    document_xml = _read_zip_xml(out, "word/document.xml")
+    assert document_xml.count('w:highlight w:val="yellow"') == 1
+    # 高亮 run 只包住填值，标签在它之前且不带高亮
+    label_pos = document_xml.index("项目名称：")
+    hl_pos = document_xml.index('w:highlight w:val="yellow"')
+    value_pos = document_xml.index("雄安新区示范工程")
+    assert label_pos < hl_pos < value_pos
+
+
+# ====================================================================
+# 下划线：还原招投标模板里的「填空线」
+# ====================================================================
+
+def test_body_underline_writes_w_u(tmp_path):
+    doc = Document()
+    WordFormatter(doc).body("整段划线", underline=True)
+    out = tmp_path / "u.docx"
+    doc.save(out)
+
+    xml = _read_zip_xml(out, "word/document.xml")
+    assert '<w:u ' in xml and 'w:val="single"' in xml
+
+
+def test_body_without_underline_leaves_runs_clean(tmp_path):
+    """默认不能顺手写下划线：Word 会继承样式里的设置，多余一个 w:u 就整篇带线。"""
+    doc = Document()
+    WordFormatter(doc).body("不划线")
+    out = tmp_path / "nou.docx"
+    doc.save(out)
+
+    assert '<w:u ' not in _read_zip_xml(out, "word/document.xml")
+
+
+def test_body_segments_underline_only_marked_segment(tmp_path):
+    """填空线只画在填进去的值下面，占位标签不划线——下划线必须是逐片段的。"""
+    doc = Document()
+    WordFormatter(doc).body_segments([
+        {"text": "中国雄安集团生态建设投资有限公司", "underline": True},
+        {"text": "（采购人名称）："},
+    ])
+    out = tmp_path / "seg_u.docx"
+    doc.save(out)
+
+    xml = _read_zip_xml(out, "word/document.xml")
+    assert xml.count("<w:u ") == 1
+    # 下划线只在第一个 run 上，标签 run 不带
+    underline_pos = xml.index("<w:u ")
+    label_pos = xml.index("（采购人名称）")
+    assert underline_pos < label_pos
+    assert xml.index("中国雄安集团生态建设投资有限公司") < label_pos
+
+
+def test_body_segments_tuple_form_still_works(tmp_path):
+    """老的两元组写法（文本, 高亮）不能因为加了 underline 就坏掉。"""
+    doc = Document()
+    WordFormatter(doc).body_segments([("项目名称：", False), ("雄安", True)])
+    out = tmp_path / "seg_tuple.docx"
+    doc.save(out)
+
+    xml = _read_zip_xml(out, "word/document.xml")
+    assert xml.count('w:highlight w:val="yellow"') == 1
+    assert "<w:u " not in xml
+
+
+# ====================================================================
+# 行距固定值：PDF 里只能量出「相邻行基线差多少 pt」，换算成倍数要依赖字体自身
+# 行高，直接写 pt 才精确
+# ====================================================================
+
+def test_line_spacing_pt_writes_exact_rule(tmp_path):
+    doc = Document()
+    WordFormatter(doc).body("固定行距", line_spacing_pt=21.9)
+    out = tmp_path / "lspt.docx"
+    doc.save(out)
+
+    xml = _read_zip_xml(out, "word/document.xml")
+    assert 'w:lineRule="exact"' in xml
+    assert 'w:line="438"' in xml          # 21.9pt = 438 twips
+
+
+def test_line_spacing_pt_overrides_multiple(tmp_path):
+    """给了固定值就不能再写倍数，否则两个属性并存、Word 取谁不确定。"""
+    doc = Document()
+    WordFormatter(doc).body("固定行距", line_spacing=1.5, line_spacing_pt=20)
+    out = tmp_path / "lspt2.docx"
+    doc.save(out)
+
+    xml = _read_zip_xml(out, "word/document.xml")
+    assert 'w:lineRule="exact"' in xml
+    assert 'w:lineRule="auto"' not in xml
+    assert 'w:line="400"' in xml          # 20pt = 400 twips
+
+
+def test_multiple_line_spacing_still_available(tmp_path):
+    doc = Document()
+    WordFormatter(doc).body("倍数行距", line_spacing=1.5)
+    out = tmp_path / "lsmulti.docx"
+    doc.save(out)
+
+    xml = _read_zip_xml(out, "word/document.xml")
+    assert 'w:lineRule="auto"' in xml and 'w:line="360"' in xml
+
+
+# ====================================================================
+# 整段左缩进：还原「整段右移」的表单行（既不是居中，也不是首行缩进）
+# ====================================================================
+
+def test_left_indent_pt_writes_w_ind(tmp_path):
+    doc = Document()
+    # indent=False：这里只验证「整段左缩进」这一个维度，不带首行缩进
+    WordFormatter(doc).body("联合体牵头人名称：", left_indent_pt=120.5, indent=False)
+    out = tmp_path / "li.docx"
+    doc.save(out)
+
+    xml = _read_zip_xml(out, "word/document.xml")
+    assert '<w:ind w:left="2410"' in xml      # 120.5pt = 2410 twips
+    assert "w:firstLine" not in xml
+
+
+def test_left_indent_absent_leaves_indent_unset(tmp_path):
+    doc = Document()
+    WordFormatter(doc).body("普通正文", indent=False)
+    out = tmp_path / "li2.docx"
+    doc.save(out)
+
+    # 只在 w:ind 里找：sectPr 的页边距也有 w:left，直接搜 w:left 会误判
+    assert "<w:ind" not in _read_zip_xml(out, "word/document.xml")
+
+
+def test_left_indent_and_first_line_indent_are_independent(tmp_path):
+    """整段左缩进和首行缩进是两个维度，同时给要能共存。"""
+    doc = Document()
+    WordFormatter(doc).body("两段缩进", left_indent_pt=28, indent=True, font_size=14)
+    out = tmp_path / "li3.docx"
+    doc.save(out)
+
+    xml = _read_zip_xml(out, "word/document.xml")
+    assert '<w:ind w:left="560"' in xml      # 28pt = 560 twips
+    assert "w:firstLineChars" in xml
+
+
+# ====================================================================
+# 模板填充：在已有内容上原位改写
+# ====================================================================
+
+def test_replace_text_keeps_original_run_format(tmp_path):
+    """替换后新文本必须沿用原 run 的字体字号——这是「填完和原文一致」的核心。"""
+    doc = Document()
+    par = doc.add_paragraph()
+    WordFormatter.set_run_font(par.add_run("标段名称："), cn_font="仿宋_GB2312", size="三号")
+
+    assert WordFormatter.replace_text(par, "标段名称：", "标段名称：一标段") == 1
+    assert par.text == "标段名称：一标段"
+
+    out = tmp_path / "replace.docx"
+    doc.save(out)
+    xml = _read_zip_xml(out, "word/document.xml")
+    assert "标段名称：一标段" in xml
+    assert 'w:eastAsia="仿宋_GB2312"' in xml
+    assert 'w:sz w:val="32"' in xml          # 三号 = 16pt = 32 半磅
+
+
+def test_replace_text_spans_multiple_runs():
+    """Word 常把一句话拆成多个 run，跨 run 的匹配同样要能替换。"""
+    doc = Document()
+    par = doc.add_paragraph()
+    WordFormatter.set_run_font(par.add_run("项目名称："), cn_font="宋体", size=14)
+    WordFormatter.set_run_font(par.add_run("测试项目"), cn_font="宋体", size=14)
+
+    assert WordFormatter.replace_text(par, "名称：测试", "名称：雄安") == 1
+    assert par.text == "项目名称：雄安项目"
+
+
+def test_replace_text_with_empty_old_appends_to_paragraph():
+    """old 传空串 = 追加到段尾，用于「标签：____」这类只在后面补值的填空。"""
+    doc = Document()
+    par = doc.add_paragraph()
+    WordFormatter.set_run_font(par.add_run("委托代理人身份证号码："), cn_font="宋体", size=12)
+
+    assert WordFormatter.replace_text(par, "", "110101199001011234") == 1
+    assert par.text == "委托代理人身份证号码：110101199001011234"
+
+
+def test_replace_text_fills_empty_cell_with_style_font(tmp_path):
+    """模板里的空格子（一个 run 都没有）也要能填，字体按样式解析而不是留空。"""
+    doc = Document()
+    WordFormatter(doc).set_paragraph_style("Normal", font_name="楷体", font_size=15)
+    table = doc.add_table(rows=1, cols=1)
+
+    assert WordFormatter.replace_text(table.cell(0, 0).paragraphs[0], "", "赵六") == 1
+    assert table.cell(0, 0).text == "赵六"
+
+    out = tmp_path / "empty-cell.docx"
+    doc.save(out)
+    xml = _read_zip_xml(out, "word/document.xml")
+    assert 'w:eastAsia="楷体"' in xml
+    assert 'w:sz w:val="30"' in xml          # 15pt = 30 半磅
+
+
+def test_replace_text_on_empty_paragraph_rejects_non_empty_old():
+    doc = Document()
+    par = doc.add_paragraph()
+
+    with pytest.raises(ValueError) as excinfo:
+        WordFormatter.replace_text(par, "占位", "x")
+
+    assert "old 传空串" in str(excinfo.value)
+
+
+def test_replace_text_count_zero_replaces_every_occurrence():
+    doc = Document()
+    par = doc.add_paragraph()
+    par.add_run("占位/占位/占位")
+
+    assert WordFormatter.replace_text(par, "占位", "值", count=0) == 3
+    assert par.text == "值/值/值"
+
+
+def test_replace_text_count_limits_replacements():
+    doc = Document()
+    par = doc.add_paragraph()
+    par.add_run("占位/占位/占位")
+
+    assert WordFormatter.replace_text(par, "占位", "值", count=2) == 2
+    assert par.text == "值/值/占位"
+
+
+def test_replace_text_raises_when_source_text_missing():
+    doc = Document()
+    par = doc.add_paragraph()
+    par.add_run("没有这段文字")
+
+    with pytest.raises(ValueError):
+        WordFormatter.replace_text(par, "不存在的占位", "x")
+
+
+def test_replace_text_raises_when_paragraph_has_no_run():
+    doc = Document()
+    par = doc.add_paragraph()
+
+    with pytest.raises(ValueError):
+        WordFormatter.replace_text(par, "任意", "x")
+
+
+def test_replace_text_highlight_marks_filled_run(tmp_path):
+    doc = Document()
+    par = doc.add_paragraph()
+    par.add_run("项目名称：")
+
+    WordFormatter.replace_text(par, "项目名称：", "项目名称：雄安", highlight=True)
+    out = tmp_path / "replace-hl.docx"
+    doc.save(out)
+
+    assert 'w:highlight w:val="yellow"' in _read_zip_xml(out, "word/document.xml")
+
+
+def test_replace_text_without_highlight_leaves_format_clean(tmp_path):
+    doc = Document()
+    par = doc.add_paragraph()
+    par.add_run("项目名称：")
+
+    WordFormatter.replace_text(par, "项目名称：", "项目名称：雄安")
+    out = tmp_path / "replace-nohl.docx"
+    doc.save(out)
+
+    assert "w:highlight" not in _read_zip_xml(out, "word/document.xml")
+
+
+def test_insert_cell_image_lands_inside_the_cell(tmp_path):
+    doc = Document()
+    table = doc.add_table(rows=1, cols=1)
+    WordFormatter.set_cell(table.cell(0, 0), "此格附身份证正面")
+    png = _write_test_png(tmp_path / "id.png")
+
+    returned = WordFormatter.insert_cell_image(table.cell(0, 0), png, width=5)
+
+    assert returned.text == ""
+    out = tmp_path / "cell-image.docx"
+    doc.save(out)
+    xml = _read_zip_xml(out, "word/document.xml")
+    assert "<w:drawing>" in xml
+    assert "此格附身份证正面" not in xml      # 默认清掉格内的占位文字
+    with ZipFile(out) as zf:
+        assert any(name.startswith("word/media/") for name in zf.namelist())
+
+
+def test_insert_cell_image_keep_text_preserves_caption(tmp_path):
+    doc = Document()
+    table = doc.add_table(rows=1, cols=1)
+    WordFormatter.set_cell(table.cell(0, 0), "身份证正面")
+    png = _write_test_png(tmp_path / "id2.png")
+
+    WordFormatter.insert_cell_image(table.cell(0, 0), png, width=5, keep_text=True)
+    out = tmp_path / "cell-image-keep.docx"
+    doc.save(out)
+
+    xml = _read_zip_xml(out, "word/document.xml")
+    assert "身份证正面" in xml
+    assert "<w:drawing>" in xml
+
+
+def test_insert_cell_image_rejects_non_positive_width(tmp_path):
+    doc = Document()
+    table = doc.add_table(rows=1, cols=1)
+    png = _write_test_png(tmp_path / "id3.png")
+
+    with pytest.raises(ValueError):
+        WordFormatter.insert_cell_image(table.cell(0, 0), png, width=0)
+
+
+def test_describe_blocks_lists_paragraphs_and_tables():
+    doc = Document()
+    doc.add_paragraph("第一段")
+    doc.add_paragraph("第二段")
+    table = doc.add_table(rows=1, cols=2)
+    table.cell(0, 0).paragraphs[0].add_run("费率")
+    table.cell(0, 1).paragraphs[0].add_run("%")
+
+    blocks = WordFormatter(doc).describe_blocks()
+
+    assert [block["type"] for block in blocks] == ["paragraph", "paragraph", "table"]
+    assert [block["index"] for block in blocks[:2]] == [0, 1]
+    assert blocks[0]["text"] == "第一段"
+    assert blocks[2]["index"] == 0
+    assert blocks[2]["grid"] == [["费率", "%"]]
+    assert blocks[2]["rows"] == 1 and blocks[2]["columns"] == 2
+
+
+def test_describe_blocks_skips_empty_paragraphs_by_default():
+    doc = Document()
+    doc.add_paragraph("")
+    doc.add_paragraph("有内容")
+
+    assert [b["index"] for b in WordFormatter(doc).describe_blocks()] == [1]
+    assert [b["index"] for b in
+            WordFormatter(doc).describe_blocks(include_empty=True)] == [0, 1]
+
+
+def test_describe_blocks_resolves_font_inherited_from_style():
+    """模板里的 run 常常不写字体，全靠样式继承；这里必须回落到实际生效的字体。"""
+    doc = Document()
+    WordFormatter(doc).set_paragraph_style("Normal", font_name="楷体", font_size=15)
+    doc.add_paragraph("项目名称：")
+
+    run = WordFormatter(doc).describe_blocks()[0]["runs"][0]
+
+    assert run["font_name"] == "楷体"
+    assert run["font_size_pt"] == 15.0
+
+
+def test_describe_blocks_truncates_long_text():
+    doc = Document()
+    doc.add_paragraph("很长的内容" * 20)
+
+    block = WordFormatter(doc).describe_blocks(max_text_chars=10)[0]
+
+    assert block["text"] == "很长的内容很长的内容很"[:10] + "…"

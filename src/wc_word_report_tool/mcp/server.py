@@ -7,6 +7,7 @@
 """
 
 import argparse
+import ipaddress
 import sys
 
 if sys.version_info < (3, 10):
@@ -27,6 +28,9 @@ INSTRUCTIONS = """中文 Word 报告编制工具。用 python-docx 生成符合�
 3. 用 `word_set_page_numbers` 设置页码，`word_set_header` / `word_set_footer` 设置页眉页脚
 4. `word_save_report` 落盘
 
+关闭、TTL 回收或容量淘汰前，未保存的会话会自动保存到输出目录；结果里会给出
+`auto_saved_to` 或 `maintenance_events`。如果自动保存失败，会话不会被丢弃。
+
 ## 填模板（在已有文档里补内容）
 
 上面的流程是「从空白开始、按顺序追加」；如果要往**一份现成的 .docx**（招投标文件、
@@ -46,9 +50,13 @@ INSTRUCTIONS = """中文 Word 报告编制工具。用 python-docx 生成符合�
 - **顺序即文档顺序**：工具按调用顺序追加内容，请按报告的阅读顺序调用。
 - **批量写入**：多段正文用 `word_add_body_list` 一次传数组，比逐段调用高效。
 - **字号**支持数字（pt）或中文字号字符串：`14`、`"三号"`、`"小五"`。
+  不确定 pt 对应哪一号时，用 `word_convert_font_size` 换算：它按**吸附**规则
+  取最接近的一档，返回 `font_size` 与 `exact`，`exact=False` 表示该 pt 是被吸附
+  过去的（`delta_pt` 是差值）；正好落在两档正中间时用 `ties="larger"|"smaller"` 指定取向。
 - **对齐**支持 `"居中"` / `"两端对齐"` / `"居左"` / `"居右"`，也接受 `center` / `justify` / `left` / `right`。
 - **单位**：页边距、图片宽度、列宽是 cm；字号、段间距是 pt。
 - `section_index` / `table_index` 默认 `-1`，表示最后一节 / 最后一个表格。
+- MCP HTTP 仅允许绑定本机回环地址；当前版本没有认证和路径隔离。
 
 ## 限制（请提前告知用户）
 
@@ -62,6 +70,13 @@ INSTRUCTIONS = """中文 Word 报告编制工具。用 python-docx 生成符合�
 
 如果某个 `WordFormatter` 方法没有被包装成独立工具，用 `word_describe_api` 查看
 全部方法签名，再用 `word_call(doc_id, method, params)` 直接调用。
+
+`word_call` 对象参数支持：
+- `section` / `table`：整数索引，`-1` 表示最后一个。
+- `cell`：`{"table_index": -1, "row": 0, "col": 0}`。
+- `paragraph`：正文段落下标，或
+  `{"table_index": -1, "row": 0, "col": 0, "paragraph_index": 0}`。
+- `run`：`{"paragraph": <paragraph 引用>, "run_index": 0}`。
 """
 
 
@@ -80,8 +95,22 @@ def load_server_class():
     return MCPServer, 2
 
 
+def _is_loopback_host(host: str) -> bool:
+    if host.lower() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
 def build_server(host: str = "127.0.0.1", port: int = 8000):
     """构造 MCP 服务端实例并注册全部工具。"""
+    if not _is_loopback_host(host):
+        raise ValueError(
+            f"拒绝绑定非本机地址 {host!r}。当前版本没有认证和路径隔离，"
+            "仅允许 localhost / 127.0.0.1 / ::1。"
+        )
     server_class, major = load_server_class()
     options = {"instructions": INSTRUCTIONS}
     if major == 1:
@@ -110,7 +139,10 @@ def main() -> None:
     parser.add_argument("--port", type=int, default=8000, help="HTTP 传输监听端口")
     args = parser.parse_args()
 
-    server = build_server(host=args.host, port=args.port)
+    try:
+        server = build_server(host=args.host, port=args.port)
+    except ValueError as exc:
+        parser.error(str(exc))
     if args.transport == "stdio":
         server.run(transport="stdio")
     else:

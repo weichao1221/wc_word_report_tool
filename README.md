@@ -5,7 +5,7 @@
 1. **数字转中文大写**：`number_to_chinese_upper()` 把数字转成人民币金额大写。
 2. **Word 格式化**：`WordFormatter` 提供从封面、正文、表格、页眉页脚到目录、页码的完整覆盖，默认值贴近中国公文标准。
 
-> 版本：v0.6.0
+> 版本：v0.7.6
 > 作者：willcha
 > 许可证：MIT
 > Python：>=3.9
@@ -273,7 +273,9 @@ doc.save("投标文件格式-已填写.docx")
 字号要自己猜，段落位置也会跑到文档末尾。
 
 **跨 run 匹配**：Word 常把一句话拆成好几个 run（改过几次字体就会这样），
-`replace_text` 按整段文本匹配，不受拆分影响；匹配跨 run 时新文本落在**第一个** run 上。
+`replace_text` 按整段文本匹配，不受拆分影响；新文本落在匹配起点所在的 run 上，
+相邻 run 即使字体不同也不会串格式。`w:tab`、`w:br` 等节点会保留，
+替换内容里的 `\t` 和 `\n` 也会写回对应的 Word 节点。
 
 **字体回落**：模板里的 run 经常一个字体属性都不写、全靠样式继承，
 `describe_blocks()` 会按 `run -> 段落样式链 -> docDefaults` 逐层回落，
@@ -415,6 +417,34 @@ formatter.heading("1. 一级标题")
 
 支持的中文字号：`初号/小初/一号/小一/二号/小二/三号/小三/四号/小四/五号/小五/六号/小六/七号/八号`。
 
+反向换算（pt → 中文字号）用 `pt_to_font_size()`，规则是**吸附**：离哪一档近就取哪一档。
+
+```python
+from wc_word_report_tool import pt_to_font_size, describe_font_size
+
+pt_to_font_size(22)       # "二号"    精确命中
+pt_to_font_size("10.5")   # "五号"
+pt_to_font_size("三号")   # "三号"    传中文字号原样返回
+
+pt_to_font_size(11)       # "五号"   11 落在 五号(10.5) 与 小四(12) 之间，偏向五号
+pt_to_font_size(19)       # "小二"   偏向小二(18)
+pt_to_font_size(21)       # "二号"   偏向二号(22)
+
+pt_to_font_size(13)              # "四号"   13 正好在 小四(12) 与 四号(14) 正中间
+pt_to_font_size(13, ties="smaller")   # "小四"   正中时改取更小的号
+
+describe_font_size(11)    # {"pt": 11.0, "font_size": "五号", "exact": False, "delta_pt": 0.5}
+```
+
+- `PT_TO_FONT_SIZE_MAP` 由 `FONT_SIZE_MAP` 反转生成，加字号只需改一处，两张表不会漂移。
+  16 档全覆盖：含 `小初`(36)、`小二`(18)、`小一`(24)、`小六`(6.5)、`七号`(5.5) 这些容易漏的。
+- **吸附**：取距离最近的一档。正好落在两档正中间时（13、20、31 这类）由 `ties` 决定，
+  默认 `"larger"` 取更大的号，传 `"smaller"` 取更小的号。
+- `exact=False` 表示这个 pt 并不等于任何中文字号、是被吸附过去的，`delta_pt` 是吸附的差值。
+- **`size` 也接受 python-docx 的 `Length`**（`run.font.size` 读出来就是它）。
+  `Length` 是 `int` 子类、内部存 EMU，`Pt(22)` 的真身是 `279400`，
+  不做转换会被当成巨大字号——现在会正确取它的 `.pt`。
+
 ## 对齐方式参数
 
 `alignment` 参数支持多种形式：
@@ -444,6 +474,38 @@ formatter.heading("1. 一级标题")
 | `border_size`（边框粗细） | 1/8 pt（4 = 0.5pt 细线，8 = 1pt） |
 
 ## 版本说明
+
+### v0.7.6
+
+- **修复模板替换损坏**：相邻 run 的边界不再归错格式；跨 run 替换保留 Tab、
+  换行及未命中的节点，替换为空字符串也不会残留原字符。
+- **修复单元格残留**：`set_cell()` / `edit_cell()` 改写整个单元格，
+  多段落和合并单元格不会再留下旧内容。
+- **列宽严格校验**：`col_widths` 必须与表格列数完全一致，避免生成错位的 `tblGrid`。
+- **原子保存**：先写同目录临时文件，再替换目标文件；写入失败不会破坏原文件。
+- **MCP 会话自动保存**：关闭、TTL 回收和容量淘汰前自动保存未提交内容，
+  返回 `auto_saved_to` 或 `maintenance_events`；保存失败时保留会话。
+- **`word_call` 对象引用**：`section` / `table` 继续使用整数索引，新增
+  `paragraph`、`cell`、`run` 的 JSON 引用协议，底层方法也可通过兜底工具调用。
+- **MCP 仅限本机**：HTTP 服务拒绝绑定非回环地址，避免在无认证状态下暴露任意文件读写。
+
+### v0.7.5
+
+补上字号的**反向换算**。此前只有「中文字号 → pt」一个方向：`_to_pt()` 让
+`font_size="三号"` 能落成 16pt，但从文档里读回 22pt 时，你没法知道那其实是「二号」。
+
+- **`pt_to_font_size(size, *, ties="larger")`**：pt → 中文字号，规则是**吸附**——
+  离哪一档近就取哪一档，`22` → `"二号"`、`11` → `"五号"`（偏向五号 10.5）。
+  正好落在两档正中间时（13、20、31 这类）由 `ties` 决定取更大的号还是更小的号。
+- **`describe_font_size(size, *, ties="larger")`**：返回
+  `{"pt", "font_size", "exact", "delta_pt"}`，用 `exact=False` 标出「这个 pt 是被
+  吸附过去的」，`delta_pt` 说明吸附差了多少。
+- **修一个真 bug**：`_to_pt()` 原先把 python-docx 的 `Length` 当成 pt 数值。
+  `Length` 是 `int` 子类、内部存 EMU，`Pt(22)` 的真身是 `279400`，
+  于是 `run.font.size` 这类值会被算成巨大字号、一律吸附到 `初号`。
+  现在统一走 `.pt`，同时所有 `font_size` 参数也顺带能接受 `Length`。
+- **`PT_TO_FONT_SIZE_MAP`**：由 `FONT_SIZE_MAP` 反转生成，新增字号只改一处即可。
+- 对应 MCP 工具：`word_convert_font_size(size, ties="larger")`（两个方向都接，返回体同上）。
 
 ### v0.7.4
 
@@ -609,6 +671,9 @@ wc-report-mcp                            # stdio（默认）
 wc-report-mcp --transport streamable-http --port 8000
 ```
 
+当前 MCP 服务没有认证和路径隔离，因此只允许绑定 `localhost`、
+`127.0.0.1` 或 `::1`；传入其他地址会拒绝启动。
+
 客户端配置（以 `~/wc-reports` 为输出目录）：
 
 ```json
@@ -671,7 +736,7 @@ word_save_report              → 存到目标路径（建议传绝对路径）
 | 节与页码 | `word_insert_section`、`word_set_section_page`、`word_set_page_numbers`、`word_restart_page_numbering`、`word_set_page_number_start`、`word_set_page_number_format` |
 | 目录与样式 | `word_add_toc`、`word_set_toc_level_style`、`word_set_paragraph_style`、`word_add_custom_heading` |
 | 模板化组合 | `word_add_cover_page`、`word_add_signature_page` |
-| 独立工具 | `word_rmb_upper`（数字转大写，不需要 doc_id） |
+| 独立工具 | `word_rmb_upper`（数字转大写）、`word_convert_font_size`（pt ↔ 中文字号），都不需要 doc_id |
 | 兜底 | `word_describe_api`、`word_call` |
 
 图片类参数（`word_insert_image`、`word_set_header_image`、`word_add_cover_page`、
@@ -705,8 +770,25 @@ word_describe_api()                              → 列出全部方法与签名
 word_call(doc_id, "set_toc_level_style", {"level": 1, "font_size": 14})
 ```
 
-`word_call` 的 `section` / `table` 参数可以直接传整数索引（`-1` 表示最后一个），
-服务端会自动换成真实对象。
+`word_call` 的对象参数支持以下 JSON 引用，负数索引均从末尾计算：
+
+```
+section:   0 / -1
+table:     0 / -1
+cell:      {table_index, row, col}
+paragraph: 正文段落下标，或 {table_index, row, col, paragraph_index}
+run:       {paragraph: <paragraph 引用>, run_index}
+```
+
+例如：
+
+```python
+word_call(doc_id, "set_run_font", {
+    "run": {"paragraph": 0, "run_index": 0},
+    "cn_font": "黑体",
+    "size": "三号",
+})
+```
 
 ### 已知限制
 
@@ -720,7 +802,16 @@ word_call(doc_id, "set_toc_level_style", {"level": 1, "font_size": 14})
    已保存的 `.docx` 可以用 `word_open_report` 重新载入。
 4. **MCP 需要 Python ≥ 3.10**；主库本身仍支持 3.9。
 
+## 发布流程
 
+先在 PyPI 项目里配置 Trusted Publisher（GitHub 仓库
+`weichao1221/wc_word_report_tool`、工作流 `publish.yml`、环境 `pypi`），
+并在 GitHub 仓库创建同名 `pypi` environment。
+
+发布前统一更新 `pyproject.toml`、`wc_word_report_tool.__version__`、README
+和 `word.py` 中的版本号，运行 `./publish_to_pypi.sh` 做本地构建检查。
+提交并推送 `main` 后创建 `vX.Y.Z` 标签；标签与包版本不一致时流程会失败，
+一致时测试通过后自动上传 PyPI。
 
 ## License
 

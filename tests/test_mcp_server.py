@@ -67,6 +67,7 @@ EXPECTED_TOOLS = {
     "word_add_cover_page",
     "word_add_signature_page",
     "word_rmb_upper",
+    "word_convert_font_size",
     "word_describe_api",
     "word_call",
 }
@@ -92,6 +93,11 @@ def test_expected_tool_surface_is_registered():
 def test_server_class_detection_returns_known_major():
     _, major = load_server_class()
     assert major in (1, 2)
+
+
+def test_server_rejects_non_loopback_host():
+    with pytest.raises(ValueError, match="拒绝绑定非本机地址"):
+        build_server(host="0.0.0.0")
 
 
 def test_schemas_expose_real_json_types():

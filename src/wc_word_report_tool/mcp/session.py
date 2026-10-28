@@ -53,7 +53,7 @@ def resolve_output_path(name: str | None) -> Path:
         path = candidate if candidate.is_absolute() else output_root() / candidate
     else:
         stamp = time.strftime("%Y%m%d-%H%M%S")
-        path = output_root() / f"report-{stamp}.docx"
+        path = output_root() / f"report-{stamp}-{uuid.uuid4().hex[:6]}.docx"
     if path.suffix.lower() != ".docx":
         path = path.with_suffix(".docx")
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -88,6 +88,8 @@ class Session:
         self.doc = doc
         self.source_path = source_path
         self.saved_path: Path | None = None
+        self.saved_at: float | None = None
+        self.dirty = False
         self.created_at = time.time()
         self.last_used = self.created_at
         self._tmp_dir: Path | None = None
@@ -108,6 +110,31 @@ class Session:
             shutil.rmtree(self._tmp_dir, ignore_errors=True)
             self._tmp_dir = None
 
+    def save(self, target: Path | None = None, *, refresh_fields_on_open: bool = True) -> Path:
+        """原子保存文档，避免写入中断破坏已有文件。"""
+        path = target or self.saved_path or resolve_output_path(None)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if refresh_fields_on_open:
+            self.formatter._ensure_update_fields_on_open()
+
+        fd, temp_name = tempfile.mkstemp(
+            prefix=f".{path.stem}-", suffix=".tmp", dir=str(path.parent),
+        )
+        os.close(fd)
+        temp_path = Path(temp_name)
+        existing_mode = path.stat().st_mode & 0o777 if path.exists() else 0o644
+        try:
+            os.chmod(temp_path, existing_mode)
+            self.doc.save(str(temp_path))
+            os.replace(temp_path, path)
+        except Exception:
+            temp_path.unlink(missing_ok=True)
+            raise
+        self.saved_path = path
+        self.saved_at = time.time()
+        self.dirty = False
+        return path
+
     def describe(self) -> dict:
         sections = self.doc.sections
         return {
@@ -117,6 +144,8 @@ class Session:
             "tables": len(self.doc.tables),
             "saved_path": str(self.saved_path) if self.saved_path else None,
             "source_path": str(self.source_path) if self.source_path else None,
+            "dirty": self.dirty,
+            "saved_at": round(self.saved_at, 1) if self.saved_at else None,
             "age_seconds": round(time.time() - self.created_at, 1),
         }
 
@@ -137,6 +166,7 @@ class SessionStore:
         self._sessions: dict[str, Session] = {}
         self._ttl_seconds = ttl_seconds
         self._max_sessions = max_sessions
+        self._events: list[dict] = []
         self.lock = threading.RLock()
 
     def create(self, *, source_path: Path | None = None) -> Session:
@@ -144,7 +174,9 @@ class SessionStore:
             self._reap_locked()
             if len(self._sessions) >= self._max_sessions:
                 oldest = min(self._sessions.values(), key=lambda s: s.last_used)
-                self._discard_locked(oldest.doc_id)
+                self._discard_locked(
+                    oldest.doc_id, reason="capacity", auto_save=True,
+                )
             doc_id = uuid.uuid4().hex[:12]
             doc = Document(str(source_path)) if source_path else Document()
             session = Session(doc_id, doc, source_path=source_path)
@@ -164,21 +196,67 @@ class SessionStore:
             session.last_used = time.time()
             return session
 
-    def close(self, doc_id: str) -> None:
+    def close(self, doc_id: str) -> dict:
         with self.lock:
             if doc_id not in self._sessions:
                 raise ReportSessionError(f"未知的 doc_id: {doc_id!r}，无法关闭。")
-            self._discard_locked(doc_id)
+            return self._discard_locked(
+                doc_id, reason="close", auto_save=True, record_event=False,
+            )
 
     def close_all(self) -> None:
         with self.lock:
             for doc_id in list(self._sessions):
-                self._discard_locked(doc_id)
+                self._discard_locked(
+                    doc_id, reason="reset", auto_save=False, record_event=False,
+                )
+            self._events.clear()
 
-    def _discard_locked(self, doc_id: str) -> None:
-        session = self._sessions.pop(doc_id, None)
-        if session is not None:
-            session.cleanup()
+    def drain_events(self) -> list[dict]:
+        """取出并清空自动保存/维护事件，供 MCP 响应附带返回。"""
+        with self.lock:
+            events = list(self._events)
+            self._events.clear()
+            return events
+
+    def _discard_locked(
+        self,
+        doc_id: str,
+        *,
+        reason: str,
+        auto_save: bool,
+        record_event: bool = True,
+    ) -> dict:
+        session = self._sessions.get(doc_id)
+        if session is None:
+            raise ReportSessionError(f"未知的 doc_id: {doc_id!r}，无法释放。")
+
+        was_dirty = session.dirty
+        auto_saved_to = None
+        if auto_save and was_dirty:
+            try:
+                auto_saved_to = session.save()
+            except Exception as exc:
+                raise ReportSessionError(
+                    f"会话 {doc_id!r} 尚未保存，自动保存失败：{exc}。"
+                    "会话已保留，请指定可写目录后重新调用 word_save_report。"
+                ) from exc
+            if record_event:
+                self._events.append({
+                    "doc_id": doc_id,
+                    "reason": reason,
+                    "saved_to": str(auto_saved_to),
+                })
+
+        self._sessions.pop(doc_id, None)
+        session.cleanup()
+        return {
+            "closed": doc_id,
+            "saved_path": str(session.saved_path) if session.saved_path else None,
+            "source_path": str(session.source_path) if session.source_path else None,
+            "was_dirty": was_dirty,
+            "auto_saved_to": str(auto_saved_to) if auto_saved_to else None,
+        }
 
     def _reap_locked(self) -> None:
         if self._ttl_seconds <= 0:
@@ -186,7 +264,7 @@ class SessionStore:
         deadline = time.time() - self._ttl_seconds
         for doc_id, session in list(self._sessions.items()):
             if session.last_used < deadline:
-                self._discard_locked(doc_id)
+                self._discard_locked(doc_id, reason="ttl", auto_save=True)
 
 
 def materialize_image(

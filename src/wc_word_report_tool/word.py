@@ -9,7 +9,7 @@
 3. **默认合理**：默认值贴近中国公文标准（仿宋_GB2312、三号 14pt、1.5 倍行距）。
 4. **严格校验**：未知参数抛 ValueError 而非静默降级，便于调试。
 
-版本：v0.7.4
+版本：v0.7.6
 作者：willcha
 """
 
@@ -19,11 +19,10 @@ import datetime as _datetime
 import io
 from pathlib import Path
 
-from docx.enum.style import WD_STYLE_TYPE
 from docx.enum.section import WD_ORIENT, WD_SECTION_START
+from docx.enum.style import WD_STYLE_TYPE
 from docx.enum.table import WD_ROW_HEIGHT_RULE, WD_TABLE_ALIGNMENT
 from docx.enum.text import (
-    WD_ALIGN_PARAGRAPH,
     WD_COLOR_INDEX,
     WD_PARAGRAPH_ALIGNMENT,
     WD_TAB_ALIGNMENT,
@@ -34,8 +33,6 @@ from docx.oxml import OxmlElement, parse_xml
 from docx.oxml.ns import qn
 from docx.shared import Cm, Pt, RGBColor
 from docx.table import Table
-from docx.text.paragraph import Paragraph
-
 
 # ====================================================================
 # 字号常量（单位：pt）
@@ -51,6 +48,10 @@ FONT_SIZE_MAP = {
     "六号": 7.5, "小六": 6.5,
     "七号": 5.5, "八号": 5,
 }
+
+# pt -> 中文字号 反向对照。FONT_SIZE_MAP 的每一档数值都不重复，可直接反转，
+# 因此两个表永远同步，不会出现只改一边的漂移。
+PT_TO_FONT_SIZE_MAP = {pt: name for name, pt in FONT_SIZE_MAP.items()}
 
 # 公文/报告常用默认值
 DEFAULT_CN_FONT = "仿宋_GB2312"
@@ -108,9 +109,16 @@ _HEADER_FOOTER_VARIANTS = {
 def _to_pt(size) -> float:
     """将字号参数统一转为 pt。
     - int/float：视为 pt 数值
+    - python-docx 的 ``Length``：取它的 ``.pt``（``Length`` 是 int 子类，
+      内部存的是 EMU，直接当数值用会放大 12700 倍）
     - str："三号"/"小五"/"16" 等中文号数或字符串数字
     """
     if isinstance(size, (int, float)):
+        # docx.shared.Pt(22) 的真身是整数 279400（EMU），只有 .pt 才是 22.0。
+        # run.font.size 读出来就是这个类型，漏判会让所有字号都被当成巨大值。
+        pt_value = getattr(size, "pt", None)
+        if isinstance(pt_value, (int, float)):
+            return float(pt_value)
         return float(size)
     if isinstance(size, str):
         key = size.strip()
@@ -124,6 +132,59 @@ def _to_pt(size) -> float:
                 f"（如 '三号'/'小五'），可选值: {list(FONT_SIZE_MAP.keys())}"
             )
     raise TypeError(f"字号参数类型不支持: {type(size).__name__}")
+
+
+# pt_to_font_size 落在两档正中间时的取向
+_FONT_SIZE_TIE_RULES = ("larger", "smaller")
+
+
+def pt_to_font_size(size, *, ties: str = "larger") -> str:
+    """把字号**吸附**到最接近的中文字号，即 ``_to_pt`` 的逆运算。
+
+    吸附规则：离哪一档近就取哪一档。例如 11 落在五号(10.5) 与小四(12) 之间、
+    偏向五号，得到 ``"五号"``；21 落在二号(22) 与小二(18) 之间、偏向二号，
+    得到 ``"二号"``。
+
+    正好落在两档正中间时（13pt、20pt、31pt 这种）由 ``ties`` 决定取向，
+    默认取更大的号。
+
+    :param size: 字号，pt 数字 / 数字字符串 / 中文字号 / python-docx 的 ``Length``。
+    :param ties: 正中间的取向，``"larger"``（默认，取更大的号）或
+                 ``"smaller"``（取更小的号）。
+    """
+    if ties not in _FONT_SIZE_TIE_RULES:
+        raise ValueError(
+            f"ties 只能是 {list(_FONT_SIZE_TIE_RULES)}，收到: {ties!r}"
+        )
+    pt = _to_pt(size)
+    if pt in PT_TO_FONT_SIZE_MAP:
+        return PT_TO_FONT_SIZE_MAP[pt]
+    sign = -1 if ties == "larger" else 1
+    return min(
+        FONT_SIZE_MAP,
+        key=lambda name: (abs(FONT_SIZE_MAP[name] - pt), sign * FONT_SIZE_MAP[name]),
+    )
+
+
+def describe_font_size(size, *, ties: str = "larger") -> dict:
+    """给出字号的吸附明细，用来看清「最接近」到底差多少。
+
+    返回形如 ``{"pt": 22.0, "font_size": "二号", "exact": True, "delta_pt": 0.0}``：
+    ``exact=False`` 表示该 pt 并不等于任何中文字号，而是被吸附过去的，
+    ``delta_pt`` 是吸附前后的差值。
+
+    :param size: 字号，pt 数字 / 数字字符串 / 中文字号 / python-docx 的 ``Length``。
+    :param ties: 正中间的取向，同 :func:`pt_to_font_size`。
+    """
+    pt = _to_pt(size)
+    name = pt_to_font_size(pt, ties=ties)
+    delta = round(abs(FONT_SIZE_MAP[name] - pt), 4)
+    return {
+        "pt": pt,
+        "font_size": name,
+        "exact": delta == 0,
+        "delta_pt": delta,
+    }
 
 
 class WordFormatter:
@@ -1208,20 +1269,30 @@ class WordFormatter:
         :param highlight: 是否黄色高亮，默认否。用于标出「由 AI 填写的临时数据」，
                           方便人工复核。
         """
-        paragraph = cell.paragraphs[0]
+        paragraph = WordFormatter._reset_cell_content(cell)
         paragraph.alignment = WordFormatter.resolve_alignment(alignment, strict=True)
         paragraph.paragraph_format.line_spacing = line_spacing
         paragraph.paragraph_format.space_before = Pt(0)
         paragraph.paragraph_format.space_after = Pt(0)
-        # 清空原有 runs，避免叠加
-        for run in list(paragraph.runs):
-            run._r.getparent().remove(run._r)
         run = paragraph.add_run(text)
         WordFormatter.set_run_font(
             run, cn_font=font_name, size=font_size, bold=bold,
             highlight=WD_COLOR_INDEX.YELLOW if highlight else None,
         )
         return cell
+
+    @staticmethod
+    def _reset_cell_content(cell):
+        """清空单元格的全部正文，只保留一个可复用的首段落。"""
+        paragraphs = cell.paragraphs
+        if not paragraphs:
+            return cell.add_paragraph()
+        paragraph = paragraphs[0]
+        for item in list(cell.paragraphs):
+            item.clear()
+        for item in list(cell.paragraphs[1:]):
+            item._p.getparent().remove(item._p)
+        return paragraph
 
     @staticmethod
     def edit_cell(table, context: str | list[str], row: int, col: int, *,
@@ -1239,8 +1310,7 @@ class WordFormatter:
         :return: 编辑后的单元格。
         """
         cell = table.cell(row, col)
-        paragraph = cell.paragraphs[0]
-        paragraph.clear()
+        paragraph = WordFormatter._reset_cell_content(cell)
         texts = context if isinstance(context, list) else [context]
 
         for index, text in enumerate(texts):
@@ -1272,6 +1342,12 @@ class WordFormatter:
         widths = [float(w) for w in (col_widths or [])]
         if not widths:
             raise ValueError("col_widths 不能为空")
+        col_count = len(table.columns)
+        if len(widths) != col_count:
+            raise ValueError(
+                f"col_widths 有 {len(widths)} 项，但表格实际有 {col_count} 列。"
+                "请为每一列都提供宽度。"
+            )
         if any(w <= 0 for w in widths):
             raise ValueError(f"列宽必须全部大于 0，收到 {col_widths!r}")
 
@@ -1434,10 +1510,10 @@ class WordFormatter:
         if not headers:
             raise ValueError("headers 不能为空，至少需要一列表头。")
         col_count = len(headers)
-        if col_widths is not None and len(col_widths) > col_count:
+        if col_widths is not None and len(col_widths) != col_count:
             raise ValueError(
-                f"col_widths 有 {len(col_widths)} 项，超过表头的 {col_count} 列"
-                f"（表头：{list(headers)}）。请让列宽数量与表头列数一致。"
+                f"col_widths 有 {len(col_widths)} 项，但表头有 {col_count} 列"
+                f"（表头：{list(headers)}）。请让列宽数量与表头列数完全一致。"
             )
         for index, row in enumerate(rows):
             if len(row) > col_count:
@@ -2761,34 +2837,131 @@ class WordFormatter:
         spans = []
         offset = 0
         for run in paragraph.runs:
-            text = run.text
+            text = WordFormatter._run_text(run)
             spans.append((offset, offset + len(text), run, text))
             offset += len(text)
         return spans
 
     @staticmethod
-    def _locate_offset(spans, position: int):
-        """找出字符位置落在哪个 run，以及它在 run 内的偏移。"""
+    def _run_content_tokens(run):
+        """按顺序返回 run 的正文子节点及其可见文本值。"""
+        text_tags = {
+            qn("w:br"), qn("w:cr"), qn("w:noBreakHyphen"),
+            qn("w:ptab"), qn("w:t"), qn("w:tab"),
+        }
+        return [
+            (child, str(child) if child.tag in text_tags else "")
+            for child in run._r
+            if child.tag != qn("w:rPr")
+        ]
+
+    @staticmethod
+    def _run_text(run) -> str:
+        """按 OOXML 语义展开 run 的文本，包含 Tab 与换行节点。"""
+        return "".join(text for _child, text in WordFormatter._run_content_tokens(run))
+
+    @staticmethod
+    def _locate_offset(spans, position: int, *, is_end: bool = False):
+        """找出字符位置落在哪个 run，以及它在 run 内的偏移。
+
+        start 使用半开区间 ``[start, end)``，end 则看最后一个实际字符，
+        这样相邻 run 的边界不会错误归到前一个 run。
+        """
+        if is_end:
+            if position <= 0:
+                return 0, 0
+            position -= 1
         for index, (start, end, _run, _text) in enumerate(spans):
-            if start <= position <= end:
-                return index, position - start
+            if start <= position < end:
+                offset = position - start
+                return index, offset + 1 if is_end else offset
         last = len(spans) - 1
         return last, len(spans[last][3])
 
     @staticmethod
-    def _set_run_text(run, text: str):
-        """只改写 run 里的 ``w:t``，保留字体等其余属性。
+    def _text_elements(text: str):
+        """把普通文本转换成 ``w:t`` / ``w:tab`` / ``w:br`` 节点序列。"""
+        elements = []
+        buffer = []
 
-        直接给 ``run.text`` 赋值会重建整个 ``w:r``，把制表符、换行等子元素一并丢掉；
-        这里只替换文本节点，``w:tab`` / ``w:br`` 之类的结构得以保留。
-        """
-        element = run._r
-        for existing in element.findall(qn("w:t")):
-            element.remove(existing)
-        node = OxmlElement("w:t")
-        node.set(qn("xml:space"), "preserve")
-        node.text = text
-        element.append(node)
+        def flush_buffer():
+            if not buffer:
+                return
+            node = OxmlElement("w:t")
+            node.set(qn("xml:space"), "preserve")
+            node.text = "".join(buffer)
+            elements.append(node)
+            buffer.clear()
+
+        for char in text:
+            if char == "\t":
+                flush_buffer()
+                elements.append(OxmlElement("w:tab"))
+            elif char in ("\n", "\r"):
+                flush_buffer()
+                elements.append(OxmlElement("w:br"))
+            else:
+                buffer.append(char)
+        flush_buffer()
+        return elements
+
+    @staticmethod
+    def _append_run_text(run, text: str):
+        """在 run 末尾追加文本节点，保留已有 Tab、换行和图片结构。"""
+        for element in WordFormatter._text_elements(text):
+            run._r.append(element)
+        return run
+
+    @staticmethod
+    def _replace_run_range(run, start: int, end: int, replacement: str):
+        """替换 run 内 ``[start, end)`` 的可见文本，保留 rPr 和未命中的节点。"""
+        tokens = WordFormatter._run_content_tokens(run)
+        total = sum(len(text) for _element, text in tokens)
+        start = max(0, min(start, total))
+        end = max(start, min(end, total))
+
+        children = []
+        inserted = False
+        offset = 0
+        for element, text in tokens:
+            token_start = offset
+            token_end = offset + len(text)
+
+            if not inserted and text and start <= token_start:
+                children.extend(WordFormatter._text_elements(replacement))
+                inserted = True
+
+            overlap_start = max(start, token_start)
+            overlap_end = min(end, token_end)
+            if overlap_start >= overlap_end:
+                children.append(element)
+                offset = token_end
+                continue
+
+            if element.tag != qn("w:t"):
+                offset = token_end
+                continue
+
+            prefix_end = max(0, min(start - token_start, len(text)))
+            suffix_start = max(prefix_end, min(end - token_start, len(text)))
+            prefix = text[:prefix_end]
+            suffix = text[suffix_start:]
+            if prefix:
+                children.extend(WordFormatter._text_elements(prefix))
+            if not inserted:
+                children.extend(WordFormatter._text_elements(replacement))
+                inserted = True
+            if suffix:
+                children.extend(WordFormatter._text_elements(suffix))
+            offset = token_end
+
+        if not inserted:
+            children.extend(WordFormatter._text_elements(replacement))
+
+        for element, _text in tokens:
+            run._r.remove(element)
+        for element in children:
+            run._r.append(element)
         return run
 
     @staticmethod
@@ -2839,40 +3012,46 @@ class WordFormatter:
 
         if not old:
             index = len(spans) - 1
-            run, text = spans[index][2], spans[index][3]
-            WordFormatter._set_run_text(run, text + new)
+            run = spans[index][2]
+            WordFormatter._append_run_text(run, new)
             WordFormatter._highlight_run(run, highlight)
             return 1
 
         limit = count if count and count > 0 else None
         replaced = 0
+        search_from = 0
         while limit is None or replaced < limit:
             spans = WordFormatter._run_text_spans(paragraph)
             full_text = "".join(span[3] for span in spans)
-            start = full_text.find(old)
+            start = full_text.find(old, search_from)
             if start < 0:
                 break
             end = start + len(old)
             first_index, first_offset = WordFormatter._locate_offset(spans, start)
-            last_index, last_offset = WordFormatter._locate_offset(spans, end)
+            last_index, last_offset = WordFormatter._locate_offset(
+                spans, end, is_end=True,
+            )
             if first_index == last_index:
-                text = spans[first_index][3]
-                WordFormatter._set_run_text(
-                    spans[first_index][2],
-                    text[:first_offset] + new + text[last_offset:],
+                WordFormatter._replace_run_range(
+                    spans[first_index][2], first_offset, last_offset, new,
                 )
             else:
-                WordFormatter._set_run_text(
+                WordFormatter._replace_run_range(
                     spans[first_index][2],
-                    spans[first_index][3][:first_offset] + new,
+                    first_offset,
+                    len(spans[first_index][3]),
+                    new,
                 )
                 for middle in range(first_index + 1, last_index):
-                    WordFormatter._set_run_text(spans[middle][2], "")
-                WordFormatter._set_run_text(
-                    spans[last_index][2], spans[last_index][3][last_offset:],
+                    WordFormatter._replace_run_range(
+                        spans[middle][2], 0, len(spans[middle][3]), "",
+                    )
+                WordFormatter._replace_run_range(
+                    spans[last_index][2], 0, last_offset, "",
                 )
             WordFormatter._highlight_run(spans[first_index][2], highlight)
             replaced += 1
+            search_from = start + len(new)
 
         if not replaced:
             raise ValueError(f"段落里没有找到要替换的文本 {old!r}。")

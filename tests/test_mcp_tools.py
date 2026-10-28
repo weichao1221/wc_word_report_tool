@@ -74,6 +74,100 @@ def test_close_report_invalidates_doc_id():
 
     with pytest.raises(ToolError):
         tools.word_describe_report(doc_id)
+    with pytest.raises(ToolError, match="未知的 doc_id"):
+        tools.word_close_report(doc_id)
+
+
+def test_close_report_auto_saves_dirty_session():
+    doc_id = tools.word_create_report()["doc_id"]
+    tools.word_add_body(doc_id, "未显式保存的内容")
+
+    closed = tools.word_close_report(doc_id)
+
+    assert closed["was_dirty"] is True
+    assert closed["auto_saved_to"]
+    assert Path(closed["auto_saved_to"]).is_file()
+
+
+def test_save_report_clears_dirty_state():
+    doc_id = tools.word_create_report()["doc_id"]
+    tools.word_add_body(doc_id, "正文")
+
+    assert tools.word_describe_report(doc_id)["dirty"] is True
+    saved = tools.word_save_report(doc_id, "clean.docx")
+
+    assert saved["dirty"] is False
+    assert tools.word_describe_report(doc_id)["dirty"] is False
+
+
+def test_capacity_eviction_auto_saves_dirty_session(monkeypatch):
+    store = SessionStore(max_sessions=1)
+    monkeypatch.setattr(tools, "_STORE", store)
+
+    first = tools.word_create_report()["doc_id"]
+    tools.word_add_body(first, "容量淘汰前要保存")
+    second = tools.word_create_report()
+
+    events = second["maintenance_events"]
+    assert events[0]["doc_id"] == first
+    assert events[0]["reason"] == "capacity"
+    assert Path(events[0]["saved_to"]).is_file()
+
+
+def test_ttl_eviction_auto_saves_dirty_session(monkeypatch):
+    store = SessionStore(ttl_seconds=10)
+    monkeypatch.setattr(tools, "_STORE", store)
+
+    first = tools.word_create_report()["doc_id"]
+    tools.word_add_body(first, "超时前要保存")
+    store.get(first).last_used -= 11
+    second = tools.word_create_report()
+
+    events = second["maintenance_events"]
+    assert events[0]["doc_id"] == first
+    assert events[0]["reason"] == "ttl"
+    assert Path(events[0]["saved_to"]).is_file()
+
+
+def test_failed_auto_save_keeps_session(monkeypatch, tmp_path):
+    doc_id = tools.word_create_report()["doc_id"]
+    tools.word_add_body(doc_id, "不能丢")
+    blocker = tmp_path / "not-a-directory"
+    blocker.write_text("x", encoding="utf-8")
+    monkeypatch.setenv("WC_REPORT_MCP_OUTPUT_DIR", str(blocker / "out"))
+
+    with pytest.raises(ToolError) as excinfo:
+        tools.word_close_report(doc_id)
+
+    assert "自动保存失败" in str(excinfo.value)
+    assert tools.word_describe_report(doc_id)["dirty"] is True
+
+
+def test_open_corrupt_docx_gives_tool_error(tmp_path):
+    path = tmp_path / "broken.docx"
+    path.write_bytes(b"not a zip")
+
+    with pytest.raises(ToolError) as excinfo:
+        tools.word_open_report(str(path))
+
+    assert "Package not found" in str(excinfo.value)
+
+
+def test_save_failure_does_not_overwrite_existing_file(monkeypatch, tmp_path):
+    target = tmp_path / "existing.docx"
+    target.write_bytes(b"original")
+    doc_id = tools.word_create_report()["doc_id"]
+    session = tools._STORE.get(doc_id)
+
+    def fail_save(path):
+        Path(path).write_bytes(b"partial")
+        raise OSError("模拟磁盘写入失败")
+
+    monkeypatch.setattr(session.doc, "save", fail_save)
+    with pytest.raises(ToolError):
+        tools.word_save_report(doc_id, str(target))
+
+    assert target.read_bytes() == b"original"
 
 
 def test_save_without_path_reuses_previous_target(tmp_path):
@@ -122,6 +216,42 @@ def test_rmb_upper_needs_no_doc_id():
     assert tools.word_rmb_upper("1,234.5")["chinese_upper"] == "壹仟贰佰叁拾肆元伍角"
 
 
+def test_convert_font_size_needs_no_doc_id():
+    assert tools.word_convert_font_size(22) == {
+        "pt": 22.0, "font_size": "二号", "exact": True, "delta_pt": 0.0,
+    }
+    assert tools.word_convert_font_size("三号")["pt"] == 16
+    assert tools.word_convert_font_size(11)["font_size"] == "五号"
+    assert tools.word_convert_font_size(11)["exact"] is False
+
+
+def test_convert_font_size_snaps_and_honours_ties():
+    assert tools.word_convert_font_size(11)["font_size"] == "五号"      # 偏向五号(10.5)
+    assert tools.word_convert_font_size(13)["font_size"] == "四号"      # 正中，默认取大
+    assert tools.word_convert_font_size(13, ties="smaller")["font_size"] == "小四"
+
+
+def test_convert_font_size_accepts_docx_length():
+    from docx.shared import Pt
+
+    assert tools.word_convert_font_size(Pt(22))["font_size"] == "二号"
+    assert tools.word_convert_font_size(Pt(22))["pt"] == 22.0
+
+
+def test_convert_font_size_surfaces_readable_error():
+    with pytest.raises(ToolError) as excinfo:
+        tools.word_convert_font_size("unknown")
+
+    assert "无法识别的字号" in str(excinfo.value)
+
+
+def test_convert_font_size_surfaces_readable_error_for_bad_ties():
+    with pytest.raises(ToolError) as excinfo:
+        tools.word_convert_font_size(13, ties="middle")
+
+    assert "ties" in str(excinfo.value)
+
+
 def test_describe_api_lists_formatter_methods():
     text = tools.word_describe_api()
 
@@ -160,6 +290,52 @@ def test_word_call_resolves_section_index_to_object():
     head_path = "word/header1.xml"
     assert head_path in _zip_names(Path(saved["saved_to"]))
     assert "兜底页眉" in _read_zip_xml(Path(saved["saved_to"]), head_path)
+
+
+def test_word_call_resolves_paragraph_run_and_cell_references():
+    doc_id = tools.word_create_report()["doc_id"]
+    tools.word_add_body(doc_id, "正文")
+    session = tools._STORE.get(doc_id)
+    cell = session.doc.add_table(rows=1, cols=1).cell(0, 0)
+    cell.text = "旧内容"
+
+    tools.word_call(
+        doc_id,
+        "set_run_font",
+        {
+            "run": {"paragraph": 0, "run_index": 0},
+            "cn_font": "黑体",
+            "size": "三号",
+        },
+    )
+    tools.word_call(
+        doc_id,
+        "set_paragraph_format",
+        {"paragraph": 0, "alignment": "居中"},
+    )
+    tools.word_call(
+        doc_id,
+        "set_cell",
+        {
+            "cell": {"table_index": -1, "row": 0, "col": 0},
+            "text": "新内容",
+        },
+    )
+
+    assert session.doc.paragraphs[0].runs[0].font.name == "Times New Roman"
+    assert session.doc.paragraphs[0].runs[0]._r.rPr.rFonts.get(
+        "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}eastAsia"
+    ) == "黑体"
+    assert cell.text == "新内容"
+
+
+def test_word_call_rejects_bad_object_references():
+    doc_id = tools.word_create_report()["doc_id"]
+
+    with pytest.raises(ToolError) as excinfo:
+        tools.word_call(doc_id, "set_cell", {"cell": {"table_index": -1}})
+
+    assert "cell 引用缺少字段" in str(excinfo.value)
 
 
 def test_word_call_rejects_private_and_unknown_methods():
@@ -829,7 +1005,7 @@ def test_add_table_grid_mismatch_becomes_readable_tool_error():
 
     message = str(excinfo.value)
     assert "col_widths 有 4 项" in message
-    assert "超过表头的 1 列" in message
+    assert "但表头有 1 列" in message
     assert "tuple index out of range" not in message
 
 

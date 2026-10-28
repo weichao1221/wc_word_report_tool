@@ -7,9 +7,16 @@ import pytest
 from docx import Document
 from docx.enum.text import WD_PARAGRAPH_ALIGNMENT
 from docx.oxml.ns import qn
+from docx.shared import Cm, Pt
 
 from wc_word_report_tool import WordFormatter
-from wc_word_report_tool.word import FONT_SIZE_MAP, _to_pt
+from wc_word_report_tool.word import (
+    FONT_SIZE_MAP,
+    PT_TO_FONT_SIZE_MAP,
+    _to_pt,
+    describe_font_size,
+    pt_to_font_size,
+)
 
 
 def _read_zip_xml(docx_path: Path, inner_path: str) -> str:
@@ -53,6 +60,85 @@ def test_font_size_map_contains_common_sizes():
     assert FONT_SIZE_MAP["三号"] == 16
     assert FONT_SIZE_MAP["小五"] == 9
     assert FONT_SIZE_MAP["四号"] == 14
+
+
+def test_pt_to_font_size_exact_match():
+    assert pt_to_font_size(22) == "二号"
+    assert pt_to_font_size(10.5) == "五号"
+    assert pt_to_font_size("22") == "二号"
+    assert pt_to_font_size("二号") == "二号"
+
+
+def test_pt_to_font_size_falls_back_to_nearest():
+    assert pt_to_font_size(11) == "五号"     # 10.5 与 11 只差 0.5
+    assert pt_to_font_size(13) == "四号"     # 与小四(12)/四号(14) 同差 1，默认取更大的号
+    assert pt_to_font_size(20) == "二号"     # 与小二(18)/二号(22) 同差 2，默认取更大的号
+    assert pt_to_font_size(30) == "一号"     # 26 比 36 更接近
+
+
+def test_pt_to_font_size_snaps_to_the_nearer_side():
+    assert pt_to_font_size(9.1) == "小五"    # 偏向小五(9)
+    assert pt_to_font_size(8.9) == "小五"
+    assert pt_to_font_size(9.8) == "五号"    # 越过 9.75 的中点后偏向五号(10.5)
+    assert pt_to_font_size(21) == "二号"     # 偏向二号(22)
+    assert pt_to_font_size(19) == "小二"     # 偏向小二(18)
+    assert pt_to_font_size(11.9) == "小四"   # 偏向小四(12)
+
+
+def test_pt_to_font_size_ties_can_prefer_smaller():
+    assert pt_to_font_size(13, ties="smaller") == "小四"
+    assert pt_to_font_size(20, ties="smaller") == "小二"
+    assert pt_to_font_size(31, ties="smaller") == "一号"
+    assert pt_to_font_size(13, ties="larger") == "四号"
+    # 非正中的值不受 ties 影响
+    assert pt_to_font_size(11, ties="smaller") == "五号"
+
+
+def test_pt_to_font_size_rejects_unknown_ties():
+    with pytest.raises(ValueError):
+        pt_to_font_size(13, ties="middle")
+
+
+def test_pt_to_font_size_accepts_python_docx_length():
+    """docx 的 Length 是 int 子类、内部存 EMU，不能直接当 pt 用。"""
+    assert _to_pt(Pt(22)) == 22.0
+    assert _to_pt(Pt(10.5)) == 10.5
+    assert pt_to_font_size(Pt(22)) == "二号"
+    assert pt_to_font_size(Pt(14)) == "四号"
+    assert describe_font_size(Pt(11))["font_size"] == "五号"
+
+
+def test_pt_to_font_size_covers_every_chinese_size():
+    for name, pt in FONT_SIZE_MAP.items():
+        assert pt_to_font_size(pt) == name
+        assert pt_to_font_size(name) == name          # 传中文字号原样返回
+        assert PT_TO_FONT_SIZE_MAP[pt] == name
+    # 小初 / 小二 / 小一 这些「小 X 号」不许漏
+    assert pt_to_font_size(36) == "小初"
+    assert pt_to_font_size(18) == "小二"
+    assert pt_to_font_size(24) == "小一"
+    assert pt_to_font_size(6.5) == "小六"
+    assert pt_to_font_size(5.5) == "七号"
+
+
+def test_pt_to_font_size_raises_on_unknown_string():
+    with pytest.raises(ValueError):
+        pt_to_font_size("unknown")
+
+
+def test_pt_to_font_size_map_is_reverse_of_font_size_map():
+    assert PT_TO_FONT_SIZE_MAP[22] == "二号"
+    assert PT_TO_FONT_SIZE_MAP[10.5] == "五号"
+    assert len(PT_TO_FONT_SIZE_MAP) == len(FONT_SIZE_MAP)
+
+
+def test_describe_font_size_reports_exact_and_delta():
+    assert describe_font_size(22) == {
+        "pt": 22.0, "font_size": "二号", "exact": True, "delta_pt": 0.0,
+    }
+    assert describe_font_size(11) == {
+        "pt": 11.0, "font_size": "五号", "exact": False, "delta_pt": 0.5,
+    }
 
 
 # ====================================================================
@@ -1074,11 +1160,22 @@ def test_add_table_rejects_col_widths_longer_than_headers():
     """OCR 曾产出「表头 1 列、列宽 4 个」，旧代码抛的是 tuple index out of range。"""
     doc = Document()
 
-    with pytest.raises(ValueError, match="col_widths 有 4 项，超过表头的 1 列"):
+    with pytest.raises(ValueError, match="col_widths 有 4 项，但表头有 1 列"):
         WordFormatter(doc).add_table(
             headers=["合并表头"],
             rows=[["a", "b", "c", "d"]],
             col_widths=[1, 2, 3, 4],
+        )
+
+
+def test_add_table_rejects_col_widths_shorter_than_headers():
+    doc = Document()
+
+    with pytest.raises(ValueError, match="col_widths 有 2 项，但表头有 3 列"):
+        WordFormatter(doc).add_table(
+            headers=["A", "B", "C"],
+            rows=[["1", "2", "3"]],
+            col_widths=[2, 3],
         )
 
 
@@ -1226,6 +1323,8 @@ def test_set_table_columns_rejects_bad_widths():
         WordFormatter.set_table_columns(table, [])
     with pytest.raises(ValueError, match="列宽必须全部大于 0"):
         WordFormatter.set_table_columns(table, [2.0, 0])
+    with pytest.raises(ValueError, match="表格实际有 2 列"):
+        WordFormatter.set_table_columns(table, [2.0])
 
 
 def test_add_page_break_writes_page_break(tmp_path):
@@ -1497,6 +1596,59 @@ def test_replace_text_spans_multiple_runs():
     assert par.text == "项目名称：雄安项目"
 
 
+def test_replace_text_uses_matching_run_at_adjacent_boundary():
+    """匹配从第二个 run 开始时，不能把新文本写到前一个 run 的格式里。"""
+    doc = Document()
+    par = doc.add_paragraph()
+    label = par.add_run("标签")
+    label.font.name = "黑体"
+    label.font.size = Pt(18)
+    value = par.add_run("值")
+    value.font.name = "宋体"
+    value.font.size = Pt(10.5)
+
+    assert WordFormatter.replace_text(par, "值", "新值") == 1
+
+    assert [run.text for run in par.runs] == ["标签", "新值"]
+    assert par.runs[1].font.name == "宋体"
+    assert par.runs[1].font.size == Pt(10.5)
+
+
+def test_replace_text_preserves_tabs_and_line_breaks():
+    doc = Document()
+    par = doc.add_paragraph()
+    par.add_run("A\tB\nC")
+
+    assert WordFormatter.replace_text(par, "B", "X") == 1
+    assert par.text == "A\tX\nC"
+
+    assert WordFormatter.replace_text(par, "\t", "-") == 1
+    assert par.text == "A-X\nC"
+
+
+def test_replace_text_keeps_drawing_order_inside_run(tmp_path):
+    doc = Document()
+    paragraph = doc.add_paragraph()
+    run = paragraph.add_run()
+    run.add_text("前")
+    run.add_picture(str(_write_test_png(tmp_path / "inline.png")), width=Cm(1))
+    run.add_text("后")
+
+    assert WordFormatter.replace_text(paragraph, "后", "新后") == 1
+
+    xml = run._r.xml
+    assert xml.index("前") < xml.index("<w:drawing") < xml.index("新后")
+
+
+def test_replace_text_count_zero_does_not_reprocess_replacement():
+    doc = Document()
+    par = doc.add_paragraph()
+    par.add_run("A/A")
+
+    assert WordFormatter.replace_text(par, "A", "AA", count=0) == 2
+    assert par.text == "AA/AA"
+
+
 def test_replace_text_with_empty_old_appends_to_paragraph():
     """old 传空串 = 追加到段尾，用于「标签：____」这类只在后面补值的填空。"""
     doc = Document()
@@ -1590,6 +1742,17 @@ def test_replace_text_without_highlight_leaves_format_clean(tmp_path):
     doc.save(out)
 
     assert "w:highlight" not in _read_zip_xml(out, "word/document.xml")
+
+
+def test_set_cell_removes_extra_paragraphs():
+    doc = Document()
+    cell = doc.add_table(rows=1, cols=1).cell(0, 0)
+    cell.text = "第一段"
+    cell.add_paragraph("第二段")
+
+    WordFormatter.set_cell(cell, "新内容")
+
+    assert [paragraph.text for paragraph in cell.paragraphs] == ["新内容"]
 
 
 def test_insert_cell_image_lands_inside_the_cell(tmp_path):

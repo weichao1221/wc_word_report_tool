@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "wc_word_report_tool"
-version = "0.7.4"
+version = "0.7.6"
 description = "Chinese Word report formatter: tables, headers/footers, TOC, page numbering, cover, headings."
 readme = "README.md"
 requires-python = ">=3.9"
@@ -25,6 +25,7 @@ classifiers = [
   "Programming Language :: Python :: 3.10",
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
   "Topic :: Office/Business",
   "Topic :: Software Development :: Libraries :: Python Modules"
 ]
@@ -34,8 +35,8 @@ Homepage = "https://github.com/weichao1221/wc_word_report_tool"
 Repository = "https://github.com/weichao1221/wc_word_report_tool"
 
 [project.optional-dependencies]
-mcp = ["mcp>=1.2.0"]
-dev = ["pytest>=7"]
+mcp = ["mcp>=1.2.0; python_version >= '3.10'"]
+dev = ["build>=1.2", "pytest>=7", "ruff>=0.9", "twine>=5"]
 
 [project.scripts]
 wc-rmb-upper = "wc_word_report_tool.cli:main"
@@ -46,3 +47,6 @@ package-dir = {"" = "src"}
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I"]

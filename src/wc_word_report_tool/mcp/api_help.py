@@ -76,7 +76,7 @@ def formatter_api_text() -> str:
     lines.append(
         f"【静态方法 · {len(static_methods)} 个】"
         "部分需要传入 section / table / cell 对象；"
-        "在 word_call 中，section 和 table 参数可直接传整数索引（-1 表示最后一个）"
+        "在 word_call 中可用下面的 JSON 引用协议（负数索引均从末尾计算）"
     )
     for name, _ in static_methods:
         doc = _first_doc_line(name)
@@ -88,4 +88,15 @@ def formatter_api_text() -> str:
         "  number_to_chinese_upper(value) — 把数字转换为人民币金额中文大写"
         "（已包装成 word_rmb_upper 工具）"
     )
+    lines.append(
+        "  pt_to_font_size(size) / describe_font_size(size) —"
+        " pt 与中文字号互转（已包装成 word_convert_font_size 工具）"
+    )
+    lines.append("")
+    lines.append("【word_call 对象引用】")
+    lines.append("  section: 0 或 -1")
+    lines.append("  table: 0 或 -1")
+    lines.append("  cell: {table_index, row, col}")
+    lines.append("  paragraph: 正文段落下标，或 {table_index, row, col, paragraph_index}")
+    lines.append("  run: {paragraph: <paragraph 引用>, run_index}")
     return "\n".join(lines)

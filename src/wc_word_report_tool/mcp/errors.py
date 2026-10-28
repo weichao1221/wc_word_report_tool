@@ -11,6 +11,10 @@ mcp SDK 只把 ``ToolError`` 的消息透传给模型；**其它任何异常一�
 
 from __future__ import annotations
 
+from zipfile import BadZipFile, LargeZipFile
+
+from docx.opc.exceptions import PackageNotFoundError
+
 from .session import ReportSessionError
 
 
@@ -44,6 +48,9 @@ CONVERTIBLE_ERRORS = (
     KeyError,
     IndexError,
     OSError,
+    PackageNotFoundError,
+    BadZipFile,
+    LargeZipFile,
 )
 
 

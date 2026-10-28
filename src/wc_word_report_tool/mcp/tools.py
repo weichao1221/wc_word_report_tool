@@ -28,6 +28,7 @@ from ..word import (
     DEFAULT_HEADER_FOOTER_FONT,
     DEFAULT_HEADER_FOOTER_SIZE,
     WordFormatter,
+    describe_font_size,
 )
 from .api_help import formatter_api_text
 from .errors import CONVERTIBLE_ERRORS, ToolError, to_tool_error
@@ -52,27 +53,43 @@ def reset_store() -> None:
 
 
 @contextmanager
-def _op(doc_id: str) -> Iterator[Session]:
-    """取出会话并在全局锁内执行文档改写。
-
-    可预期的异常在这里统一转成 ``ToolError``，否则 mcp SDK 会把消息掩码成
-    ``Error executing tool <name>``，AI 就拿不到可自纠的中文提示了。
-    """
+def _tool_errors():
+    """把工具层的可预期异常统一转换成 MCP 可见的 ToolError。"""
     try:
-        session = _STORE.get(doc_id)
-        with _STORE.lock:
-            session.last_used = time.time()
-            yield session
-            session.last_used = time.time()
+        yield
     except ToolError:
         raise
     except CONVERTIBLE_ERRORS as exc:
         raise to_tool_error(exc) from exc
 
 
+@contextmanager
+def _op(doc_id: str, *, mark_dirty: bool = True) -> Iterator[Session]:
+    """取出会话并在全局锁内执行文档改写。
+
+    可预期的异常在这里统一转成 ``ToolError``，否则 mcp SDK 会把消息掩码成
+    ``Error executing tool <name>``，AI 就拿不到可自纠的中文提示了。
+    """
+    with _tool_errors():
+        with _STORE.lock:
+            session = _STORE.get(doc_id)
+            try:
+                yield session
+            except Exception:
+                raise
+            else:
+                if mark_dirty:
+                    session.dirty = True
+            finally:
+                session.last_used = time.time()
+
+
 def _result(session: Session, **extra: Any) -> Dict[str, Any]:
     payload = session.describe()
     payload.update(extra)
+    events = _STORE.drain_events()
+    if events:
+        payload["maintenance_events"] = events
     return payload
 
 
@@ -150,17 +167,18 @@ def word_create_report(
     :param apply_default_margins: 是否套用公文默认页边距（上 3.7 / 下 3.5 / 左 2.8 / 右 2.6 cm）。
     :param language: 文档校对语言，默认 zh-CN；传 None 则不设置。
     """
-    session = _STORE.create()
-    formatter = session.formatter
-    if apply_default_margins:
-        formatter.setup_defaults()
-    if language:
-        formatter.set_document_language(language)
-    if title:
-        session.doc.core_properties.title = title
-    if author:
-        session.doc.core_properties.author = author
-    return _result(session)
+    with _tool_errors():
+        session = _STORE.create()
+        formatter = session.formatter
+        if apply_default_margins:
+            formatter.setup_defaults()
+        if language:
+            formatter.set_document_language(language)
+        if title:
+            session.doc.core_properties.title = title
+        if author:
+            session.doc.core_properties.author = author
+        return _result(session)
 
 
 def word_open_report(path: str) -> Dict[str, Any]:
@@ -168,9 +186,10 @@ def word_open_report(path: str) -> Dict[str, Any]:
 
     :param path: 文件路径；相对路径先按当前目录解析，再按 WC_REPORT_MCP_OUTPUT_DIR 解析。
     """
-    resolved = resolve_input_path(path, what="Word 文档")
-    session = _STORE.create(source_path=resolved)
-    return _result(session, opened=str(resolved))
+    with _tool_errors():
+        resolved = resolve_input_path(path, what="Word 文档")
+        session = _STORE.create(source_path=resolved)
+        return _result(session, opened=str(resolved))
 
 
 def word_save_report(
@@ -185,17 +204,14 @@ def word_save_report(
                  省略时复用上次保存路径，从未保存过则自动生成带时间戳的文件名。
     :param refresh_fields_on_open: 是否让 Word 打开文件时自动刷新目录与页码域。
     """
-    with _op(doc_id) as session:
+    with _op(doc_id, mark_dirty=False) as session:
         if path:
             target = resolve_output_path(path)
         elif session.saved_path is not None:
             target = session.saved_path
         else:
             target = resolve_output_path(None)
-        if refresh_fields_on_open:
-            session.formatter._ensure_update_fields_on_open()
-        session.doc.save(str(target))
-        session.saved_path = target
+        session.save(target, refresh_fields_on_open=refresh_fields_on_open)
         return _result(session, saved_to=str(target), size_bytes=target.stat().st_size)
 
 
@@ -204,15 +220,8 @@ def word_close_report(doc_id: str) -> Dict[str, Any]:
 
     :param doc_id: 会话 id。关闭后该 doc_id 立即失效。
     """
-    session = _STORE.get(doc_id)
-    saved_path = session.saved_path
-    source_path = session.source_path
-    _STORE.close(doc_id)
-    return {
-        "closed": doc_id,
-        "saved_path": str(saved_path) if saved_path else None,
-        "source_path": str(source_path) if source_path else None,
-    }
+    with _tool_errors():
+        return _STORE.close(doc_id)
 
 
 def word_describe_report(doc_id: str) -> Dict[str, Any]:
@@ -220,7 +229,7 @@ def word_describe_report(doc_id: str) -> Dict[str, Any]:
 
     :param doc_id: 会话 id。
     """
-    with _op(doc_id) as session:
+    with _op(doc_id, mark_dirty=False) as session:
         payload = _result(session)
         # python-docx 的 Section 没有 paragraphs 属性，只能按节遍历正文内容
         payload["paragraphs_per_section"] = [
@@ -807,7 +816,7 @@ def word_list_blocks(
     :param include_empty: 是否连空段落一起返回，默认否（模板留白通常不用管）。
     :param max_text_chars: 单段/单格文本的截断长度，默认 200，防止长文档回传过大。
     """
-    with _op(doc_id) as session:
+    with _op(doc_id, mark_dirty=False) as session:
         blocks = session.formatter.describe_blocks(
             include_empty=include_empty, max_text_chars=max_text_chars,
         )
@@ -1642,6 +1651,23 @@ def word_rmb_upper(value: Union[float, int, str]) -> Dict[str, Any]:
     return {"value": str(value), "chinese_upper": chinese_upper}
 
 
+def word_convert_font_size(size: FontSize, ties: str = "larger") -> Dict[str, Any]:
+    """在 pt 与中文字号之间互相换算（不需要 doc_id）。
+
+    传 `11` 得到**吸附**过去的中文字号（偏向五号），传 `"二号"` 得到它对应的 pt。
+    返回的 `exact=False` 表示该 pt 并不等于任何中文字号，是被吸附的，
+    `delta_pt` 是吸附前后的差值。
+
+    :param size: 字号，pt 数字 / 数字字符串 / 中文字号（"二号"、"小四"…）。
+    :param ties: 正好落在两档正中间时的取向，`"larger"`（默认，取更大的号）
+                 或 `"smaller"`（取更小的号），例如 13pt 在 小四(12) 与 四号(14) 正中。
+    """
+    try:
+        return describe_font_size(size, ties=ties)
+    except CONVERTIBLE_ERRORS as exc:
+        raise to_tool_error(exc) from exc
+
+
 # ====================================================================
 # Layer 3 · 兜底工具（保证对 WordFormatter 的全量覆盖）
 # ====================================================================
@@ -1649,8 +1675,75 @@ def word_rmb_upper(value: Union[float, int, str]) -> Dict[str, Any]:
 _INDEXABLE_PARAMS = {"section": "sections", "table": "tables"}
 
 
+def _resolve_indexed_item(items, value: int, *, label: str):
+    index = value + len(items) if value < 0 else value
+    if index < 0 or index >= len(items):
+        upper = len(items) - 1
+        raise ReportSessionError(
+            f"{label}索引 {value} 超出范围（共 {len(items)} 个，0~{upper}）。"
+        )
+    return items[index]
+
+
+def _resolve_cell_ref(session: Session, ref: Dict[str, Any]):
+    missing = {"table_index", "row", "col"} - set(ref)
+    if missing:
+        raise ReportSessionError(
+            f"cell 引用缺少字段：{', '.join(sorted(missing))}。"
+            "格式应为 {table_index, row, col}。"
+        )
+    table = _table(session, int(ref["table_index"]))
+    row, col = int(ref["row"]), int(ref["col"])
+    row_count, col_count = len(table.rows), len(table.columns)
+    if row < 0 or row >= row_count or col < 0 or col >= col_count:
+        raise ReportSessionError(
+            f"单元格 ({row}, {col}) 超出范围（该表共 {row_count} 行 × {col_count} 列）。"
+        )
+    return table.cell(row, col)
+
+
+def _resolve_paragraph_ref(session: Session, ref: Union[int, Dict[str, Any]]):
+    if isinstance(ref, int) and not isinstance(ref, bool):
+        return _paragraph(session, ref)
+    if not isinstance(ref, dict):
+        raise ReportSessionError(
+            "paragraph 引用必须是正文段落下标，或包含 "
+            "table_index/row/col/paragraph_index 的对象。"
+        )
+    if "index" in ref and "table_index" not in ref:
+        return _paragraph(session, int(ref["index"]))
+    if "table_index" not in ref:
+        raise ReportSessionError(
+            "单元格 paragraph 引用必须包含 table_index/row/col/paragraph_index。"
+        )
+    cell = _resolve_cell_ref(session, ref)
+    paragraph_index = int(ref.get("paragraph_index", 0))
+    paragraphs = cell.paragraphs
+    if not paragraphs:
+        raise ReportSessionError("目标单元格中没有段落。")
+    return _resolve_indexed_item(
+        paragraphs, paragraph_index, label="单元格段落 ",
+    )
+
+
+def _resolve_run_ref(session: Session, ref: Dict[str, Any]):
+    if not isinstance(ref, dict):
+        raise ReportSessionError(
+            "run 引用必须是对象，格式为 "
+            "{paragraph:<段落下标或单元格段落引用>, run_index:<run 下标>}。"
+        )
+    if "paragraph" not in ref:
+        raise ReportSessionError("run 引用缺少 paragraph 字段。")
+    paragraph = _resolve_paragraph_ref(session, ref["paragraph"])
+    runs = paragraph.runs
+    if not runs:
+        raise ReportSessionError("目标段落中没有 run。")
+    run_index = int(ref.get("run_index", 0))
+    return _resolve_indexed_item(runs, run_index, label="run ")
+
+
 def _resolve_object_params(session: Session, params: Dict[str, Any]) -> Dict[str, Any]:
-    """把 section / table 的整数索引换成真实对象，供静态方法使用。"""
+    """把 JSON 中的 section/table/paragraph/cell/run 引用换成真实对象。"""
     resolved = dict(params)
     for key, collection in _INDEXABLE_PARAMS.items():
         value = resolved.get(key)
@@ -1659,12 +1752,17 @@ def _resolve_object_params(session: Session, params: Dict[str, Any]) -> Dict[str
         items = getattr(session.doc, collection)
         if not items:
             raise ReportSessionError(f"文档中还没有{collection}，无法解析 {key}={value}。")
-        index = value + len(items) if value < 0 else value
-        if index < 0 or index >= len(items):
-            raise ReportSessionError(
-                f"{key} 索引 {value} 超出范围（共 {len(items)} 个，0~{len(items) - 1}）。"
-            )
-        resolved[key] = items[index]
+        resolved[key] = _resolve_indexed_item(items, value, label=f"{key} ")
+
+    paragraph_ref = resolved.get("paragraph")
+    if isinstance(paragraph_ref, (int, dict)) and not isinstance(paragraph_ref, bool):
+        resolved["paragraph"] = _resolve_paragraph_ref(session, paragraph_ref)
+    cell_ref = resolved.get("cell")
+    if isinstance(cell_ref, dict):
+        resolved["cell"] = _resolve_cell_ref(session, cell_ref)
+    run_ref = resolved.get("run")
+    if isinstance(run_ref, dict):
+        resolved["run"] = _resolve_run_ref(session, run_ref)
     return resolved
 
 
@@ -1687,7 +1785,9 @@ def word_call(
     """直接调用 WordFormatter 上的任意公开方法（兜底能力，覆盖所有长尾参数）。
 
     先用 word_describe_api 查看可用方法与签名，再把关键字参数放进 params。
-    section / table 这类对象参数可以直接传整数索引，-1 表示最后一个。
+    section / table 可直接传整数索引；paragraph 传正文下标或单元格段落引用；
+    cell 传 ``{table_index,row,col}``；
+    run 传 ``{paragraph:<paragraph-ref>,run_index}``。负数索引均从末尾计算。
 
     :param doc_id: 会话 id。
     :param method: WordFormatter 的方法名，例如 "heading"、"set_toc_level_style"。
@@ -1763,6 +1863,7 @@ TOOLS = (
     word_add_signature_page,
     # Layer 2 · 无状态
     word_rmb_upper,
+    word_convert_font_size,
     # Layer 3 · 兜底
     word_describe_api,
     word_call,

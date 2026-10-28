@@ -1111,6 +1111,32 @@ def test_list_blocks_reports_paragraph_indexes_and_table_grid(tmp_path):
     assert tables[0]["grid"] == [["费率：", "%"]]
 
 
+def test_describe_format_profile_returns_config_and_code(tmp_path):
+    source = _make_template(tmp_path)
+    doc_id = tools.word_open_report(str(source))["doc_id"]
+
+    result = tools.word_describe_format_profile(doc_id)
+
+    profile = result["format_profile"]
+    assert result["schema_version"] == 1
+    assert result["dirty"] is False
+    assert profile["observed"]["groups"][0]["font"]["cn"] == "仿宋_GB2312"
+    assert "formatter = WordFormatter(doc)" in profile["python_code"]
+    assert profile["styles"]["Normal"]["used_count"] >= 1
+
+
+def test_describe_format_profile_can_skip_observed_and_code(tmp_path):
+    source = _make_template(tmp_path)
+    doc_id = tools.word_open_report(str(source))["doc_id"]
+
+    profile = tools.word_describe_format_profile(
+        doc_id, include_observed=False, include_code=False,
+    )["format_profile"]
+
+    assert "observed" not in profile
+    assert "python_code" not in profile
+
+
 def test_replace_text_in_paragraph_keeps_original_format(tmp_path):
     source = _make_template(tmp_path)
     doc_id = tools.word_open_report(str(source))["doc_id"]

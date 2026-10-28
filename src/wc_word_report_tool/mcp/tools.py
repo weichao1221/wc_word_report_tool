@@ -823,6 +823,42 @@ def word_list_blocks(
         return _result(session, blocks=blocks, block_count=len(blocks))
 
 
+def word_describe_format_profile(
+    doc_id: str,
+    include_observed: bool = True,
+    include_code: bool = True,
+    include_raw: bool = False,
+    max_groups: int = 50,
+) -> Dict[str, Any]:
+    """读取文档格式，返回标题/正文等可复刻的配置与 Python 代码。
+
+    用于「照着一份现成 .docx 复刻版式」：给出标题一/标题二/正文的字体、字号、
+    行距、首行缩进、左右缩进、段前段后、对齐，以及页面设置、页眉页脚、
+    自动编号和表格格式。返回 ``format_profile`` 与 ``schema_version``。
+
+    自动编号、页眉页脚中的域/图片、文档网格等现有接口无法重建的部分，
+    会在 ``format_profile["notes"]`` 中列出。
+
+    :param doc_id: 会话 id。
+    :param include_observed: 是否逐块实测并聚类正文格式，默认是。
+    :param include_code: 是否生成可直接执行的 Python 片段，默认是。
+    :param include_raw: 是否附带编号/条件格式的原始 XML，默认否。
+    :param max_groups: 实测分组上限，默认 50，避免长文档回传过大。
+    """
+    with _op(doc_id, mark_dirty=False) as session:
+        profile = session.formatter.describe_format_profile(
+            include_observed=include_observed,
+            include_code=include_code,
+            include_raw=include_raw,
+            max_observed_groups=max_groups,
+        )
+        return _result(
+            session,
+            format_profile=profile,
+            schema_version=profile.get("schema_version"),
+        )
+
+
 def word_replace_text(
     doc_id: str,
     old: str,
@@ -1835,6 +1871,7 @@ TOOLS = (
     word_set_table_borders,
     # Layer 2 · 模板填充
     word_list_blocks,
+    word_describe_format_profile,
     word_replace_text,
     word_insert_cell_image,
     # Layer 2 · 页眉页脚

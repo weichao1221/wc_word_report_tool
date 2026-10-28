@@ -1,3 +1,4 @@
+from .format_profile import extract_format_profile
 from .numbers import NumberConverter, about_numbers, number_to_chinese_upper
 from .word import (
     DEFAULT_BODY_SIZE,
@@ -15,7 +16,7 @@ from .word import (
     pt_to_font_size,
 )
 
-__version__ = "0.7.6"
+__version__ = "0.8.0"
 
 __all__ = [
     "__version__",
@@ -26,6 +27,8 @@ __all__ = [
     # Word 格式化
     "WordFormatter",
     "about_word",
+    # 读取文档格式
+    "extract_format_profile",
     # 字号换算
     "pt_to_font_size",
     "describe_font_size",

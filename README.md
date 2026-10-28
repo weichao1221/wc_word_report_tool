@@ -5,7 +5,7 @@
 1. **数字转中文大写**：`number_to_chinese_upper()` 把数字转成人民币金额大写。
 2. **Word 格式化**：`WordFormatter` 提供从封面、正文、表格、页眉页脚到目录、页码的完整覆盖，默认值贴近中国公文标准。
 
-> 版本：v0.7.6
+> 版本：v0.8.0
 > 作者：willcha
 > 许可证：MIT
 > Python：>=3.9
@@ -281,6 +281,44 @@ doc.save("投标文件格式-已填写.docx")
 `describe_blocks()` 会按 `run -> 段落样式链 -> docDefaults` 逐层回落，
 返回真正生效的字体字号，而不是一片 `None`。
 
+### 读取文档格式（复刻版式）
+
+`describe_format_profile()` 反向读取一份现成 `.docx`，返回 JSON 配置和可直接执行的
+Python 片段，用于照着原稿复刻标题、正文与页面版式：
+
+```python
+from wc_word_report_tool import extract_format_profile
+
+profile = extract_format_profile("模板.docx")
+print(profile["styles"]["Heading 1"]["font"])       # 中文字体、字号、加粗、颜色
+print(profile["styles"]["Heading 1"]["paragraph"])  # 行距、缩进、段前后、对齐
+print(profile["python_code"])                       # 可粘贴执行的复刻代码
+```
+
+也可以绑定文档调用：`WordFormatter(doc).describe_format_profile()`。
+
+返回结构：
+
+| 键 | 内容 |
+|----|------|
+| `schema_version` | 配置结构版本，当前为 1 |
+| `document` | docDefaults、分节页面（纸张/边距/装订线/文档网格/分栏）、页眉页脚与页码、自动编号 |
+| `styles` | 标题、正文等样式的**生效值**；`resolved_from` 标注每个字段来自默认值、样式链还是直接格式 |
+| `observed` | 正文逐块实测结果，按「样式 + 格式签名」聚类，给出 `role`、`count` 和样例句下标；同时包含表格格式 |
+| `python_code` | 可直接执行的 `WordFormatter` 调用，生成后会用 `compile()` 自检 |
+| `notes` | 现有写接口无法还原、需要手工处理的部分 |
+
+单位约定：字号、段前后、行距、缩进用 `*_pt`；页面、列宽、制表位用 `*_cm`；
+字符单位缩进另存 `*_chars`（`w:firstLineChars="200"` 记为 `2.0`）；
+行距用 `rule` 区分 `multiple` / `exact` / `at_least`。
+
+**主题字体**：现代 Word 模板的 `docDefaults` 常只写 `w:eastAsiaTheme="minorEastAsia"`
+而不写字体名，这里会解析 `theme1.xml` 换成真实字体，不会返回一片 `None`。
+
+**覆盖范围**：段落/字符格式、页面设置、页眉页脚与页码、`numbering.xml` 自动编号、
+表格列宽/边框/合并/表头字体。自动编号、页眉页脚中的域与图片、`w:docGrid` 等
+现有接口无法重建，会在 `notes` 中列明并保留原始 XML（`include_raw=True`）。
+
 ### 页眉页脚
 
 | 方法 | 用途 |
@@ -404,8 +442,9 @@ formatter.heading("1. 一级标题")
 
 | 方法 | 用途 |
 |------|------|
+| `describe_format_profile(*, include_observed, include_code, include_raw, ...)` | 读取当前文档格式，导出 JSON 配置与代码；见「读取文档格式」 |
 | `set_run_font(run, *, cn_font, en_font, size, bold, color, highlight)` | 设置 run 字体 |
-| `set_paragraph_format(paragraph, *, alignment, line_spacing, first_line_indent_chars, first_line_indent_pt, ...)` | 设置段落格式；字符缩进优先，pt 缩进兜底 |
+| `set_paragraph_format(paragraph, *, alignment, line_spacing, line_spacing_pt, line_spacing_rule, first_line_indent_chars, first_line_indent_pt, left_indent_pt, right_indent_pt, ...)` | 设置段落格式；字符缩进优先，pt 缩进兜底；支持固定值/最小值行距与右缩进 |
 | `resolve_alignment(alignment, *, strict)` | 对齐方式解析 |
 
 ## 字号参数
@@ -474,6 +513,18 @@ describe_font_size(11)    # {"pt": 11.0, "font_size": "五号", "exact": False, 
 | `border_size`（边框粗细） | 1/8 pt（4 = 0.5pt 细线，8 = 1pt） |
 
 ## 版本说明
+
+### v0.8.0
+
+- **新增格式读取**：`extract_format_profile()` / `describe_format_profile()` 从现成
+  `.docx` 读取标题、正文等样式的字体、字号、行距、缩进、段前后与对齐，输出 JSON
+  配置和可执行的 Python 片段。
+- **覆盖页面与结构**：同时解析分节纸张/边距/装订线/文档网格、页眉页脚与页码、
+  `numbering.xml` 自动编号、表格列宽/边框/合并/表头字体。
+- **来源可追溯**：`resolved_from` 标注每个字段来自 `docDefaults`、样式链还是直接格式；
+  主题字体自动解析为真实字体名。
+- **写侧补齐**：`set_paragraph_style()` 支持 `en_font`、`line_spacing_pt`、
+  `line_spacing_rule`、`right_indent`；`set_paragraph_format()` 支持右缩进与最小值行距。
 
 ### v0.7.6
 
@@ -723,6 +774,17 @@ word_save_report              → 存到目标路径（建议传绝对路径）
 `word_add_body` / `word_add_body_list` / `word_insert_image` 都是**往文档末尾追加**，
 在模板上误用会把内容写到最后一页，而不是填进占位处。
 
+**读取格式另有一条路**（照着一份现成 `.docx` 复刻版式）：
+
+```
+word_open_report              → 打开源文档，拿到 doc_id
+word_describe_format_profile  → 读取标题/正文样式、页面、页眉页脚、编号与表格
+                              → 返回 JSON 配置与可执行的 python_code
+```
+
+自动编号、页眉页脚中的域/图片、文档网格等无法由现有写接口重建，结果里的
+`notes` 会逐项列出。
+
 ### 工具清单
 
 | 分组 | 工具 |
@@ -732,6 +794,7 @@ word_save_report              → 存到目标路径（建议传绝对路径）
 | 段落与标题 | `word_add_heading`、`word_add_body`、`word_add_body_list`、`word_add_blank_lines`、`word_add_cover_text`、`word_add_right_text`、`word_add_date`、`word_insert_image` |
 | 表格 | `word_add_table`、`word_merge_cells`、`word_format_cell`、`word_set_table_borders` |
 | 模板填充 | `word_list_blocks`、`word_replace_text`、`word_insert_cell_image` |
+| 读取格式 | `word_describe_format_profile` |
 | 页眉页脚 | `word_set_header`、`word_set_footer`、`word_set_header_parts`、`word_set_footer_parts`、`word_set_different_first_page`、`word_set_different_odd_even`、`word_clear_header_footer`、`word_set_header_image` |
 | 节与页码 | `word_insert_section`、`word_set_section_page`、`word_set_page_numbers`、`word_restart_page_numbering`、`word_set_page_number_start`、`word_set_page_number_format` |
 | 目录与样式 | `word_add_toc`、`word_set_toc_level_style`、`word_set_paragraph_style`、`word_add_custom_heading` |

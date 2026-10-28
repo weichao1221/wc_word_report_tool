@@ -44,6 +44,7 @@ EXPECTED_TOOLS = {
     "word_format_cell",
     "word_set_table_borders",
     "word_list_blocks",
+    "word_describe_format_profile",
     "word_replace_text",
     "word_insert_cell_image",
     "word_set_header",

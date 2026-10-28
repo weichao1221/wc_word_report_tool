@@ -1844,3 +1844,41 @@ def test_describe_blocks_truncates_long_text():
     block = WordFormatter(doc).describe_blocks(max_text_chars=10)[0]
 
     assert block["text"] == "很长的内容很长的内容很"[:10] + "…"
+
+
+def test_set_paragraph_format_writes_right_indent_and_at_least_rule():
+    doc = Document()
+    paragraph = doc.add_paragraph("正文")
+
+    WordFormatter.set_paragraph_format(
+        paragraph, line_spacing_pt=24, line_spacing_rule="atLeast", right_indent_pt=6,
+    )
+
+    spacing = paragraph._p.pPr.find(qn("w:spacing"))
+    assert spacing.get(qn("w:line")) == "480"
+    assert spacing.get(qn("w:lineRule")) == "atLeast"
+    assert paragraph.paragraph_format.right_indent.pt == 6
+
+
+def test_set_paragraph_style_supports_en_font_fixed_spacing_and_right_indent():
+    doc = Document()
+
+    style = WordFormatter(doc).set_paragraph_style(
+        "自定义标题", font_name="黑体", en_font="Arial", font_size=16,
+        line_spacing_pt=24, line_spacing_rule="atLeast", right_indent=6,
+    )
+
+    spacing = style.element.find(qn("w:pPr")).find(qn("w:spacing"))
+    assert spacing.get(qn("w:line")) == "480"
+    assert spacing.get(qn("w:lineRule")) == "atLeast"
+    assert style.font.name == "Arial"
+    assert style.element.rPr.rFonts.get(qn("w:eastAsia")) == "黑体"
+    assert style.paragraph_format.right_indent.pt == 6
+
+
+def test_set_paragraph_style_applies_en_font_without_cn_font():
+    doc = Document()
+
+    style = WordFormatter(doc).set_paragraph_style("西文样式", en_font="Arial")
+
+    assert style.font.name == "Arial"

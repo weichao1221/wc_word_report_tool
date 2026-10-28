@@ -45,6 +45,17 @@ INSTRUCTIONS = """中文 Word 报告编制工具。用 python-docx 生成符合�
 注意：`word_add_body` / `word_add_body_list` / `word_insert_image` 都是**往文档末尾追加**，
 在模板上误用会把内容写到最后一页，而不是填进占位处。
 
+## 读取格式（照着一份现成文档复刻版式）
+
+`word_open_report` 打开源文档后，用 `word_describe_format_profile` 读取格式：
+返回 `format_profile`，其中 `styles` 给出标题一/标题二/正文等样式的字体、字号、
+行距、首行缩进、左右缩进、段前段后和对齐（含每个字段来自默认值/样式/直接格式），
+`observed` 给出正文逐块实测结果，`document` 覆盖页面、页眉页脚、页码与自动编号，
+`python_code` 是可直接粘贴执行的 `WordFormatter` 调用。
+
+自动编号、页眉页脚中的域/图片、文档网格等无法由现有写接口重建，结果里的
+`notes` 会逐项列出，交付时请提醒用户手工处理。
+
 ## 重要约定
 
 - **顺序即文档顺序**：工具按调用顺序追加内容，请按报告的阅读顺序调用。

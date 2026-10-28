@@ -9,7 +9,7 @@
 3. **默认合理**：默认值贴近中国公文标准（仿宋_GB2312、三号 14pt、1.5 倍行距）。
 4. **严格校验**：未知参数抛 ValueError 而非静默降级，便于调试。
 
-版本：v0.7.6
+版本：v0.8.0
 作者：willcha
 """
 
@@ -212,11 +212,13 @@ class WordFormatter:
         "居右": WD_PARAGRAPH_ALIGNMENT.RIGHT,
         "右对齐": WD_PARAGRAPH_ALIGNMENT.RIGHT,
         "两端对齐": WD_PARAGRAPH_ALIGNMENT.JUSTIFY,
+        "分散对齐": WD_PARAGRAPH_ALIGNMENT.DISTRIBUTE,
         # 英文（不区分大小写）
         "left": WD_PARAGRAPH_ALIGNMENT.LEFT,
         "center": WD_PARAGRAPH_ALIGNMENT.CENTER,
         "right": WD_PARAGRAPH_ALIGNMENT.RIGHT,
         "justify": WD_PARAGRAPH_ALIGNMENT.JUSTIFY,
+        "distribute": WD_PARAGRAPH_ALIGNMENT.DISTRIBUTE,
         # 单字母 / 数字
         "L": WD_PARAGRAPH_ALIGNMENT.LEFT,
         "LEFT": WD_PARAGRAPH_ALIGNMENT.LEFT,
@@ -298,10 +300,12 @@ class WordFormatter:
     @staticmethod
     def set_paragraph_format(paragraph, *, alignment=None, line_spacing=1.5,
                               line_spacing_pt: float | None = None,
+                              line_spacing_rule: str | None = None,
                               space_before=0, space_after=0,
                               first_line_indent_pt=None,
                               first_line_indent_chars=None,
                               left_indent_pt: float | None = None,
+                              right_indent_pt: float | None = None,
                               strict: bool = False):
         """设置段落基础格式。
 
@@ -311,6 +315,8 @@ class WordFormatter:
         :param line_spacing_pt: 行距**固定值**，单位 pt；给了它就覆盖 ``line_spacing``。
             从 PDF 还原版式时用它：PDF 里只有「相邻两行基线差多少 pt」这一个事实，
             换算成倍数要依赖字体自身的行高（随字体而变），直接写 pt 才是精确的。
+        :param line_spacing_rule: 行距规则，``"exact"``（固定值）或 ``"atLeast"``
+            （最小值）；省略时按 python-docx 默认写成固定值。
         :param space_before: 段前空白，单位 pt。
         :param space_after: 段后空白，单位 pt。
         :param first_line_indent_pt: 首行缩进兜底值，单位 pt；None 表示不设置。
@@ -318,6 +324,8 @@ class WordFormatter:
                                         优先级高于 ``w:firstLine``。
         :param left_indent_pt: 整段左缩进，单位 pt；None 表示不设置。用于还原
                                「整段右移」的表单行——它既不是居中，也不是首行缩进。
+        :param right_indent_pt: 整段右缩进，单位 pt；None 表示不设置。与左缩进配合
+                                可复刻「两侧内缩」的版式。
         :param strict: 是否对未知对齐方式抛出 ValueError，默认否。
         """
         if alignment is not None:
@@ -325,10 +333,17 @@ class WordFormatter:
         # 赋值 Pt 对象时 python-docx 会写 lineRule=exact（固定值）；赋数字则是倍数
         paragraph.paragraph_format.line_spacing = (
             Pt(line_spacing_pt) if line_spacing_pt else line_spacing)
+        if line_spacing_pt and line_spacing_rule:
+            p_pr = paragraph._p.get_or_add_pPr()
+            spacing = p_pr.find(qn("w:spacing"))
+            if spacing is not None:
+                spacing.set(qn("w:lineRule"), str(line_spacing_rule))
         paragraph.paragraph_format.space_before = Pt(space_before)
         paragraph.paragraph_format.space_after = Pt(space_after)
         if left_indent_pt is not None:
             paragraph.paragraph_format.left_indent = Pt(left_indent_pt)
+        if right_indent_pt is not None:
+            paragraph.paragraph_format.right_indent = Pt(right_indent_pt)
         WordFormatter._set_first_line_indent(
             paragraph,
             first_line_indent_pt=first_line_indent_pt,
@@ -520,23 +535,37 @@ class WordFormatter:
         bold = options.get("bold")
         color = options.get("color")
         line_spacing = options.get("line_spacing")
+        line_spacing_pt = options.get("line_spacing_pt")
+        line_spacing_rule = options.get("line_spacing_rule")
         space_before = options.get("space_before")
         space_after = options.get("space_after")
         first_line_indent = options.get("first_line_indent")
         first_line_indent_chars = options.get("first_line_indent_chars")
         left_indent = options.get("left_indent")
+        right_indent = options.get("right_indent")
+        keep_next = options.get("keep_next")
+        page_break_before = options.get("page_break_before")
         alignment = options.get("alignment")
 
         if font_name:
             style.font.name = en_font or DEFAULT_EN_FONT
             style.element.rPr.rFonts.set(qn("w:eastAsia"), font_name)
+        elif en_font:
+            # 只给西文字体时也应生效；否则生成的样式配置会静默丢掉 en_font。
+            style.font.name = en_font
         if size is not None:
             style.font.size = Pt(_to_pt(size))
         if bold is not None:
             style.font.bold = bold
         if color is not None:
             style.font.color.rgb = RGBColor(*color)
-        if line_spacing is not None:
+        if line_spacing_pt is not None:
+            style.paragraph_format.line_spacing = Pt(line_spacing_pt)
+            if line_spacing_rule:
+                spacing = style.element.get_or_add_pPr().find(qn("w:spacing"))
+                if spacing is not None:
+                    spacing.set(qn("w:lineRule"), str(line_spacing_rule))
+        elif line_spacing is not None:
             style.paragraph_format.line_spacing = line_spacing
         if space_before is not None:
             style.paragraph_format.space_before = Pt(space_before)
@@ -550,6 +579,12 @@ class WordFormatter:
             )
         if left_indent is not None:
             style.paragraph_format.left_indent = Pt(left_indent)
+        if right_indent is not None:
+            style.paragraph_format.right_indent = Pt(right_indent)
+        if keep_next is not None:
+            style.paragraph_format.keep_with_next = bool(keep_next)
+        if page_break_before is not None:
+            style.paragraph_format.page_break_before = bool(page_break_before)
         if alignment is not None:
             style.paragraph_format.alignment = WordFormatter.resolve_alignment(alignment)
         return style
@@ -2481,9 +2516,13 @@ class WordFormatter:
 
     def set_toc_level_style(self, level: int, *, font_name: str | None = None, font_size=None,
                             bold: bool | None = None, color: tuple[int, int, int] | None = None,
-                            line_spacing=None, space_before=None, space_after=None,
+                            line_spacing=None, line_spacing_pt=None,
+                            line_spacing_rule=None,
+                            space_before=None, space_after=None,
                             first_line_indent=None, first_line_indent_chars=None,
-                            left_indent=None, alignment=None):
+                            left_indent=None, right_indent=None,
+                            keep_next=None, page_break_before=None,
+                            alignment=None):
         """设置某一级 TOC 样式。
 
         :param level: 目录层级。
@@ -2492,10 +2531,15 @@ class WordFormatter:
         :param bold: 是否加粗，可选。
         :param color: RGB 颜色元组，可选。
         :param line_spacing: 行距倍数，可选。
+        :param line_spacing_pt: 行距固定值，单位 pt，可选；优先于 ``line_spacing``。
+        :param line_spacing_rule: 行距规则，``"exact"`` 或 ``"atLeast"``，可选。
         :param space_before/space_after: 段前/段后空白，单位 pt，可选。
         :param first_line_indent: 首行缩进，单位 pt，可选。
         :param first_line_indent_chars: 首行缩进字符数，可选；设置后优先于 pt 值。
         :param left_indent: 左缩进，单位 pt，可选。
+        :param right_indent: 右缩进，单位 pt，可选。
+        :param keep_next: 是否与下段同页，可选。
+        :param page_break_before: 是否段前分页，可选。
         :param alignment: 对齐方式，可选。
         """
         style_name = f"TOC {level}"
@@ -2505,45 +2549,63 @@ class WordFormatter:
             {
                 "font_name": font_name, "font_size": font_size, "bold": bold,
                 "color": color, "line_spacing": line_spacing,
+                "line_spacing_pt": line_spacing_pt,
+                "line_spacing_rule": line_spacing_rule,
                 "space_before": space_before, "space_after": space_after,
                 "first_line_indent": first_line_indent,
                 "first_line_indent_chars": first_line_indent_chars,
-                "left_indent": left_indent,
+                "left_indent": left_indent, "right_indent": right_indent,
+                "keep_next": keep_next, "page_break_before": page_break_before,
                 "alignment": alignment,
             },
         )
 
     def set_paragraph_style(self, style_name: str, *, base_style_name: str = "Normal",
-                            font_name: str | None = None, font_size=None,
+                            font_name: str | None = None,
+                            en_font: str | None = None, font_size=None,
                             bold: bool | None = None,
                             color: tuple[int, int, int] | None = None,
-                            line_spacing=None, space_before=None, space_after=None,
+                            line_spacing=None, line_spacing_pt=None,
+                            line_spacing_rule=None,
+                            space_before=None, space_after=None,
                             first_line_indent=None, first_line_indent_chars=None,
-                            left_indent=None, alignment=None):
+                            left_indent=None, right_indent=None,
+                            keep_next=None, page_break_before=None,
+                            alignment=None):
         """创建或更新自定义段落样式。
 
         :param style_name: 样式名称。
         :param base_style_name: 基础样式名称，默认 Normal。
         :param font_name: 字体名称，可选。
+        :param en_font: 西文字体名称，可选；省略时用默认西文字体。
         :param font_size: 字号，支持中文字号字符串，可选。
         :param bold: 是否加粗，可选。
         :param color: RGB 颜色元组，可选。
         :param line_spacing: 行距倍数，可选。
+        :param line_spacing_pt: 行距固定值，单位 pt，可选；优先于 ``line_spacing``。
+        :param line_spacing_rule: 行距规则，``"exact"`` 或 ``"atLeast"``，可选。
         :param space_before/space_after: 段前/段后空白，单位 pt，可选。
         :param first_line_indent/left_indent: 缩进，单位 pt，可选。
         :param first_line_indent_chars: 首行缩进字符数，可选；设置后优先于 pt 值。
+        :param right_indent: 右缩进，单位 pt，可选。
+        :param keep_next: 是否与下段同页，可选。
+        :param page_break_before: 是否段前分页，可选。
         :param alignment: 对齐方式，可选。
         """
         style = self._get_or_create_style(style_name, base_style_name)
         return self._apply_style_options(
             style,
             {
-                "font_name": font_name, "font_size": font_size, "bold": bold,
+                "font_name": font_name, "en_font": en_font,
+                "font_size": font_size, "bold": bold,
                 "color": color, "line_spacing": line_spacing,
+                "line_spacing_pt": line_spacing_pt,
+                "line_spacing_rule": line_spacing_rule,
                 "space_before": space_before, "space_after": space_after,
                 "first_line_indent": first_line_indent,
                 "first_line_indent_chars": first_line_indent_chars,
-                "left_indent": left_indent,
+                "left_indent": left_indent, "right_indent": right_indent,
+                "keep_next": keep_next, "page_break_before": page_break_before,
                 "alignment": alignment,
             },
         )
@@ -2830,6 +2892,41 @@ class WordFormatter:
                 "runs": [self._run_font_info(item, run) for run in item.runs],
             })
         return blocks
+
+    def describe_format_profile(self, *, include_observed: bool = True,
+                                include_code: bool = True,
+                                include_raw: bool = False,
+                                include_all_styles: bool = False,
+                                include_sources: bool = True,
+                                max_observed_groups: int = 50,
+                                max_samples: int = 10) -> dict:
+        """读取当前文档的格式，返回可复刻的 JSON 配置与代码片段。
+
+        与 :meth:`describe_blocks` 只看文本和字体不同，这里按
+        ``docDefaults -> 样式链 -> 直接格式`` 逐层解析，给出标题一/标题二/正文等
+        样式的**生效值**，以及页面、页眉页脚、自动编号和表格格式。
+
+        :param include_observed: 是否逐块实测并聚类正文格式，默认是。
+        :param include_code: 是否生成可直接执行的 Python 片段，默认是。
+        :param include_raw: 是否附带编号/条件格式的原始 XML，默认否。
+        :param include_all_styles: 是否输出全部段落样式，默认只输出使用中的关键样式。
+        :param include_sources: 是否输出 ``resolved_from`` 来源标注，默认是。
+        :param max_observed_groups: 实测分组上限，默认 50。
+        :param max_samples: 每组保留的段落下标数量，默认 10。
+        :return: 可 ``json.dumps`` 的格式配置字典。
+        """
+        from .format_profile import extract_format_profile
+
+        return extract_format_profile(
+            self.doc,
+            include_observed=include_observed,
+            include_code=include_code,
+            include_raw=include_raw,
+            include_all_styles=include_all_styles,
+            include_sources=include_sources,
+            max_observed_groups=max_observed_groups,
+            max_samples=max_samples,
+        )
 
     @staticmethod
     def _run_text_spans(paragraph):

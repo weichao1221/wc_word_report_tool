@@ -92,6 +92,10 @@ def formatter_api_text() -> str:
         "  pt_to_font_size(size) / describe_font_size(size) —"
         " pt 与中文字号互转（已包装成 word_convert_font_size 工具）"
     )
+    lines.append(
+        "  extract_format_profile(source) — 读取 .docx 格式并导出可复刻配置与代码"
+        "（已包装成 word_describe_format_profile 工具）"
+    )
     lines.append("")
     lines.append("【word_call 对象引用】")
     lines.append("  section: 0 或 -1")

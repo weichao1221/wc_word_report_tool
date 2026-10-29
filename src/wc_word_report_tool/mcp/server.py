@@ -16,6 +16,8 @@ if sys.version_info < (3, 10):
         + "请升级 Python，或仅使用 pip install wc_word_report_tool 的基础功能。"
     )
 
+from mcp.server.mcpserver import MCPServer
+
 from . import tools
 
 INSTRUCTIONS = """中文 Word 报告编制工具。用 python-docx 生成符合中国公文格式的报告。
@@ -39,8 +41,13 @@ INSTRUCTIONS = """中文 Word 报告编制工具。用 python-docx 生成符合�
 1. `word_open_report` 打开模板 → `word_list_blocks` 看清有哪些段落和单元格
 2. 文本占位用 `word_replace_text`（给 `paragraph_index`，或 `table_index`/`row`/`col`）。
    它只改写原有 run 的文本，字体字号自动沿用原文，**不需要你重新指定格式**
-3. 证件照这类要贴进格子的图片用 `word_insert_cell_image`
-4. `word_save_report` 存到目标路径（建议传绝对路径）
+3. 只由空格组成、带下划线的空位用 `word_fill_underline`，参数取 `word_list_blocks`
+   返回的 `run_index`；表格空位传 table_index/row/col，可见占位文字用
+   `word_replace_underline_text`
+4. 已有目录占位时，先 `word_describe_format_profile` 读取原格式，再通读结构；
+   用 `word_finalize_document` 一次统一标题层级、目录和分节页码
+5. 证件照这类要贴进格子的图片用 `word_insert_cell_image`
+6. `word_save_report` 存到目标路径（建议传绝对路径）
 
 注意：`word_add_body` / `word_add_body_list` / `word_insert_image` 都是**往文档末尾追加**，
 在模板上误用会把内容写到最后一页，而不是填进占位处。
@@ -91,21 +98,6 @@ INSTRUCTIONS = """中文 Word 报告编制工具。用 python-docx 生成符合�
 """
 
 
-def load_server_class():
-    """返回 ``(服务端类, 主版本号)``，兼容 mcp 1.x 与 2.x。
-
-    mcp 2.x 把 ``FastMCP`` 改名为 ``MCPServer``，并且把 host/port 从构造函数挪到了
-    ``run()`` 参数上，因此需要区分处理。
-    """
-    try:
-        from mcp.server.mcpserver import MCPServer
-    except ImportError:
-        from mcp.server.fastmcp import FastMCP
-
-        return FastMCP, 1
-    return MCPServer, 2
-
-
 def _is_loopback_host(host: str) -> bool:
     if host.lower() == "localhost":
         return True
@@ -122,12 +114,7 @@ def build_server(host: str = "127.0.0.1", port: int = 8000):
             f"拒绝绑定非本机地址 {host!r}。当前版本没有认证和路径隔离，"
             "仅允许 localhost / 127.0.0.1 / ::1。"
         )
-    server_class, major = load_server_class()
-    options = {"instructions": INSTRUCTIONS}
-    if major == 1:
-        # mcp 1.x 通过构造函数的 settings 配置监听地址。
-        options.update(host=host, port=port)
-    server = server_class("wc-word-report", **options)
+    server = MCPServer("wc-word-report", instructions=INSTRUCTIONS)
     tools.register(server)
     return server
 

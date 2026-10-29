@@ -1659,6 +1659,73 @@ def test_replace_text_with_empty_old_appends_to_paragraph():
     assert par.text == "委托代理人身份证号码：110101199001011234"
 
 
+def test_fill_underline_preserves_width_and_format(tmp_path):
+    doc = Document()
+    par = doc.add_paragraph()
+    WordFormatter.set_run_font(par.add_run("地址："), cn_font="宋体", size=10.5)
+    blank = par.add_run(" " * 24)
+    WordFormatter.set_run_font(blank, cn_font="宋体", size=10.5)
+    blank.font.underline = True
+
+    result = WordFormatter.fill_underline(par, 1, "河北省雄安新区金湖街88号")
+
+    assert result["original_length"] == 24
+    assert len(result["replacement"]) == 24
+    assert result["replacement"].startswith(" ")
+    assert result["replacement"].endswith(" ")
+    assert par.runs[1].text == result["replacement"]
+    assert par.runs[1].underline is True
+
+    out = tmp_path / "fill-underline.docx"
+    doc.save(out)
+    xml = _read_zip_xml(out, "word/document.xml")
+    assert "河北省雄安新区金湖街88号" in xml
+    assert "<w:u " in xml
+
+
+def test_fill_underline_rejects_visible_or_unmarked_run():
+    doc = Document()
+    par = doc.add_paragraph()
+    par.add_run("地址：")
+    par.add_run(" " * 12)
+
+    with pytest.raises(ValueError, match="不是带下划线的空白"):
+        WordFormatter.fill_underline(par, 1, "x")
+    with pytest.raises(ValueError, match="含有可见文字"):
+        WordFormatter.fill_underline(par, 0, "x")
+
+
+def test_fill_underline_in_table_cell_can_disable_trailing_spaces():
+    doc = Document()
+    table = doc.add_table(rows=1, cols=1)
+    par = table.cell(0, 0).paragraphs[0]
+    blank = par.add_run(" " * 6)
+    blank.font.underline = True
+    par.add_run("元")
+
+    result = WordFormatter.fill_underline(
+        par, 0, "128000", trailing_spaces=0
+    )
+
+    assert result["replacement"] == " 128000"
+    assert par.text == " 128000元"
+    assert par.runs[0].underline is True
+
+
+def test_replace_underline_text_keeps_surrounding_spaces_and_underline():
+    doc = Document()
+    par = doc.add_paragraph()
+    run = par.add_run("    （招标项目名称、招标编号）    ")
+    run.font.underline = True
+
+    result = WordFormatter.replace_underline_text(
+        par, 0, "（招标项目名称、招标编号）", "项目名称、RXZB-2026-1026"
+    )
+
+    assert result["replacement"] == "    项目名称、RXZB-2026-1026    "
+    assert par.runs[0].underline is True
+
+
 def test_replace_text_fills_empty_cell_with_style_font(tmp_path):
     """模板里的空格子（一个 run 都没有）也要能填，字体按样式解析而不是留空。"""
     doc = Document()
@@ -1673,6 +1740,65 @@ def test_replace_text_fills_empty_cell_with_style_font(tmp_path):
     xml = _read_zip_xml(out, "word/document.xml")
     assert 'w:eastAsia="楷体"' in xml
     assert 'w:sz w:val="30"' in xml          # 15pt = 30 半磅
+
+
+def test_insert_toc_sets_outline_levels_and_replaces_anchor(tmp_path):
+    doc = Document()
+    doc.add_paragraph("第一章")
+    doc.add_paragraph("第一节")
+    anchor = doc.add_paragraph("请根据文件内容，自行加入目录")
+
+    toc_par, entries = WordFormatter(doc).insert_toc(
+        anchor,
+        [
+            {"paragraph_index": 0, "level": 1},
+            {"paragraph_index": 1, "level": 2},
+        ],
+    )
+
+    assert [item["level"] for item in entries] == [1, 2]
+    assert "请根据文件内容，自行加入目录" not in doc.paragraphs[2].text
+    assert toc_par._p.xpath('.//w:instrText[contains(., "TOC")]')
+    assert doc.paragraphs[0]._p.xpath('./w:pPr/w:outlineLvl[@w:val="0"]')
+    assert doc.paragraphs[1]._p.xpath('./w:pPr/w:outlineLvl[@w:val="1"]')
+
+    out = tmp_path / "insert-toc.docx"
+    doc.save(out)
+    xml = _read_zip_xml(out, "word/document.xml")
+    assert "TOC" in xml
+    assert "w:outlineLvl" in xml
+
+
+def test_finalize_document_applies_level_plan_toc_and_page_start(tmp_path):
+    doc = Document()
+    doc.add_paragraph("第一章")
+    doc.add_paragraph("第一节")
+    anchor = doc.add_paragraph("请根据文件内容，自行加入目录")
+    doc.add_section()
+
+    result = WordFormatter(doc).finalize_document(
+        anchor,
+        [
+            {"paragraph_index": 0, "level": 1},
+            {"paragraph_index": 1, "level": 2},
+        ],
+        {
+            "levels": {
+                "1": {"font_name": "黑体", "font_size": 16, "bold": True},
+                "2": {"font_name": "宋体", "font_size": 14, "bold": True},
+            },
+            "toc": {"levels_min": 1, "levels_max": 2},
+        },
+        page_start_section_index=1,
+        start_page_number=1,
+    )
+
+    assert result["entries"][0]["level"] == 1
+    assert result["page_start_section_index"] == 1
+    assert "TOC" in doc.paragraphs[2]._p.xml
+    assert doc.paragraphs[0].runs[0].font.name == "Times New Roman"
+    assert doc.paragraphs[0].runs[0].element.rPr.rFonts.get(qn("w:eastAsia")) == "黑体"
+    assert doc.sections[1]._sectPr.xpath('./w:pgNumType[@w:start="1"]')
 
 
 def test_replace_text_on_empty_paragraph_rejects_non_empty_old():

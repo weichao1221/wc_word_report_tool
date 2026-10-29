@@ -5,7 +5,7 @@
 1. **数字转中文大写**：`number_to_chinese_upper()` 把数字转成人民币金额大写。
 2. **Word 格式化**：`WordFormatter` 提供从封面、正文、表格、页眉页脚到目录、页码的完整覆盖，默认值贴近中国公文标准。
 
-> 版本：v0.8.0
+> 版本：v0.8.3
 > 作者：willcha
 > 许可证：MIT
 > Python：>=3.9
@@ -239,8 +239,9 @@ merges=[(1, 2, 1, 2)]        # (row, col, rowspan, colspan)
 
 | 方法 | 用途 |
 |------|------|
-| `describe_blocks(*, include_empty, max_text_chars)` | 列出正文块（段落 / 表格）及下标、文本、**实际生效**的字体字号 |
+| `describe_blocks(*, include_empty, max_text_chars)` | 列出正文块（段落 / 表格）及下标、文本、run 下标、字体字号和下划线状态 |
 | `replace_text(paragraph, old, new, *, count, highlight)` | 在已有段落里原位替换，**沿用原 run 的字体字号** |
+| `fill_underline(paragraph, run_index, value)` | 填写带下划线的空白 run，自动保留左右空格、原宽度和下划线格式 |
 | `insert_cell_image(cell, image_path, *, width, height, alignment, keep_text)` | 把图片贴进表格单元格（证件照、印章） |
 
 ```python
@@ -262,7 +263,10 @@ formatter.replace_text(doc.paragraphs[37], "标段名称：", "标段名称：�
 # old 传空串 = 追加到段尾，用于「身份证号码：____」这种标签后补值
 formatter.replace_text(doc.paragraphs[47], "", "130633199301125473")
 
-# 3. 证件照贴进「此格附身份证正面」那一格
+# 3. 填写下划线空白：保留左右空格、原宽度和下划线格式
+formatter.fill_underline(doc.paragraphs[62], 1, "河北省雄安新区金湖街88号")
+
+# 4. 证件照贴进「此格附身份证正面」那一格
 formatter.insert_cell_image(doc.tables[1].cell(1, 0), "id_front.jpg", width=7)
 
 doc.save("投标文件格式-已填写.docx")
@@ -514,6 +518,37 @@ describe_font_size(11)    # {"pt": 11.0, "font_size": "五号", "exact": False, 
 
 ## 版本说明
 
+### v0.8.3
+
+- **模板目录插入**：新增 `WordFormatter.insert_toc()` 和 MCP 工具
+  `word_insert_toc`。AI 通读文档后传目录项段落下标和层级，工具设置 outline level
+  并在指定目录锚点处插入 Word TOC 域。
+- **全文档最终整理**：新增 `word_finalize_document`，AI 可依据
+  `word_describe_format_profile` 的读取结果传入各级标题格式计划，同时统一目录、
+  标题层级和分节页码。
+- **下划线覆盖表格与可见占位**：`word_fill_underline` 支持表格单元格坐标；
+  新增 `word_replace_underline_text` 处理下划线 run 内的可见占位文字。
+- **适配现有模板**：不再只能把目录追加到文末，可直接替换“请根据文件内容，
+  自行加入目录”这类占位段。
+
+### v0.8.2
+
+- **MCP 依赖升级**：`[mcp]` 可选依赖改为 `mcp>=2.0`，服务端直接使用官方
+  `mcp.server.mcpserver.MCPServer`。
+- **移除旧兼容层**：不再支持 mcp 1.x 的 `FastMCP` 服务端 API。
+  MCP 协议客户端不受影响；但 Python 部署环境必须把 `mcp` 升级到 2.x。
+- **工具说明增强**：51 个 MCP 工具的 docstring 统一补充“适用、不要用于、
+  调用前后、失败处理”，这些内容会作为工具 description 直接暴露给 AI。
+
+### v0.8.1
+
+- **完善下划线空位填写**：新增 `WordFormatter.fill_underline()` 和 MCP 工具
+  `word_fill_underline`，按 `run_index` 精确填写带下划线的空白 run。
+- **保留模板版式**：自动增加前导空格、补足原有空白宽度作为尾随空格，并保留
+  run 的字体、字号和下划线格式。
+- **run 信息更完整**：`word_list_blocks` 的 run 项新增 `run_index` 和 `underline`，
+  AI 可以直接识别哪些空白是可填写的下划线槽位。
+
 ### v0.8.0
 
 - **新增格式读取**：`extract_format_profile()` / `describe_format_profile()` 从现成
@@ -573,11 +608,15 @@ describe_font_size(11)    # {"pt": 11.0, "font_size": "五号", "exact": False, 
   只改写原 run 的文本节点、**不新建 run**，因此填进去的内容自带原位置的字体、字号、加粗。
   Word 常把一句话拆成多个 run（改过几次字体就会这样），匹配按整段文本进行、不受拆分影响。
   `old` 传空串表示追加到段尾，用于「委托代理人身份证号码：____」这类标签后补值。
+- **`fill_underline(paragraph, run_index, value)`**：填写只由空格组成、带下划线
+  的模板空位。值会写成「前导空格 + 内容 + 补足原宽度的尾随空格」，
+  run 原有的字体、字号和 underline 不变。
 - **`insert_cell_image(cell, image_path, *, width, height, alignment, keep_text)`**：
   把图片贴进表格单元格。`insert_img()` 只能往正文追加，落不进已有格子，
   而身份证、营业执照、印章在表单里恰恰是「贴进格子」的。
-- 对应 MCP 工具：`word_list_blocks`、`word_replace_text`、`word_insert_cell_image`
-  （共 48 个工具）。`word_replace_text` 同时支持 `paragraph_index` 与
+- 对应 MCP 工具：`word_list_blocks`、`word_replace_text`、`word_fill_underline`、
+  `word_replace_underline_text`、`word_insert_toc`、`word_finalize_document`、
+  `word_insert_cell_image`（共 54 个工具）。`word_replace_text` 同时支持 `paragraph_index` 与
   `table_index`/`row`/`col` 两种定位。
 
 ### v0.7.3
@@ -711,6 +750,8 @@ describe_font_size(11)    # {"pt": 11.0, "font_size": "五号", "exact": False, 
 
 ## MCP 服务端
 
+> v0.8.2 起要求 `mcp>=2.0`，服务端使用 `MCPServer`；mcp 1.x / FastMCP 不再兼容。
+
 把上面的能力包装成 [MCP](https://modelcontextprotocol.io) 工具，接入 Claude Desktop、
 Cursor、Command Code 等客户端后，就可以让 AI 直接编制 Word 报告。
 
@@ -765,8 +806,12 @@ word_save_report              → 落盘，返回绝对路径
 
 ```
 word_open_report              → 打开模板，拿到 doc_id
-word_list_blocks              → 看清有哪些段落、哪些单元格、原文什么字体
-word_replace_text             → 文本占位原地替换（给 paragraph_index 或 table_index/row/col）
+word_list_blocks              → 看清段落、单元格、run 下标、字体和下划线
+word_replace_text             → 普通文本占位原地替换
+word_fill_underline           → 填写带下划线的空白 run，保留空格和格式
+word_replace_underline_text   → 替换下划线 run 内的可见占位文字
+word_insert_toc               → AI 识别章节层级后，在目录占位处插入 TOC 域
+word_finalize_document         → 统一标题格式、目录、节页码和 TOC 刷新设置
 word_insert_cell_image        → 证件照贴进表格单元格
 word_save_report              → 存到目标路径（建议传绝对路径）
 ```
@@ -793,7 +838,7 @@ word_describe_format_profile  → 读取标题/正文样式、页面、页眉页
 | 文档级设置 | `word_set_default_font`、`word_set_page_margins`、`word_set_document_language` |
 | 段落与标题 | `word_add_heading`、`word_add_body`、`word_add_body_list`、`word_add_blank_lines`、`word_add_cover_text`、`word_add_right_text`、`word_add_date`、`word_insert_image` |
 | 表格 | `word_add_table`、`word_merge_cells`、`word_format_cell`、`word_set_table_borders` |
-| 模板填充 | `word_list_blocks`、`word_replace_text`、`word_insert_cell_image` |
+| 模板填充 | `word_list_blocks`、`word_replace_text`、`word_fill_underline`、`word_replace_underline_text`、`word_insert_toc`、`word_finalize_document`、`word_insert_cell_image` |
 | 读取格式 | `word_describe_format_profile` |
 | 页眉页脚 | `word_set_header`、`word_set_footer`、`word_set_header_parts`、`word_set_footer_parts`、`word_set_different_first_page`、`word_set_different_odd_even`、`word_clear_header_footer`、`word_set_header_image` |
 | 节与页码 | `word_insert_section`、`word_set_section_page`、`word_set_page_numbers`、`word_restart_page_numbering`、`word_set_page_number_start`、`word_set_page_number_format` |

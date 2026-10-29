@@ -2345,7 +2345,7 @@ wheels = [
 
 [[package]]
 name = "wc-word-report-tool"
-version = "0.7.6"
+version = "0.8.3"
 source = { editable = "." }
 dependencies = [
     { name = "python-docx" },
@@ -2368,7 +2368,7 @@ mcp = [
 [package.metadata]
 requires-dist = [
     { name = "build", marker = "extra == 'dev'", specifier = ">=1.2" },
-    { name = "mcp", marker = "python_full_version >= '3.10' and extra == 'mcp'", specifier = ">=1.2.0" },
+    { name = "mcp", marker = "python_full_version >= '3.10' and extra == 'mcp'", specifier = ">=2.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=7" },
     { name = "python-docx", specifier = ">=1.1.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.9" },

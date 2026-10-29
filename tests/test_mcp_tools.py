@@ -5,6 +5,7 @@
 """
 
 import base64
+import inspect
 from pathlib import Path
 from zipfile import ZipFile
 
@@ -40,6 +41,13 @@ def _read_zip_xml(docx_path: Path, inner_path: str) -> str:
 def _zip_names(docx_path: Path) -> list:
     with ZipFile(docx_path) as zf:
         return zf.namelist()
+
+
+@pytest.mark.parametrize("tool", tools.TOOLS, ids=lambda tool: tool.__name__)
+def test_every_mcp_tool_docstring_has_ai_usage_guidance(tool):
+    doc = inspect.getdoc(tool) or ""
+    for section in ("适用：", "不要用于：", "调用前后：", "失败处理："):
+        assert section in doc, f"{tool.__name__} 缺少 {section}"
 
 
 # ====================================================================
@@ -559,10 +567,71 @@ def test_full_report_end_to_end():
     settings_xml = _read_zip_xml(path, "word/settings.xml")
     assert "w:updateFields" in settings_xml
     assert "zh-CN" in settings_xml
-
     footers = [name for name in _zip_names(path) if name.startswith("word/footer")]
     assert footers
     assert any("PAGE" in _read_zip_xml(path, name) for name in footers)
+
+
+def test_insert_toc_replaces_template_anchor_and_sets_outlines(tmp_path):
+    document = Document()
+    document.add_paragraph("第一章")
+    document.add_paragraph("第一节")
+    document.add_paragraph("请根据文件内容，自行加入目录")
+    source = tmp_path / "toc-template.docx"
+    document.save(source)
+    doc_id = tools.word_open_report(str(source))["doc_id"]
+
+    result = tools.word_insert_toc(
+        doc_id,
+        anchor_paragraph_index=2,
+        entries=[
+            {"paragraph_index": 0, "level": 1},
+            {"paragraph_index": 1, "level": 2},
+        ],
+    )
+
+    assert result["toc_paragraph_index"] == 2
+    assert [item["level"] for item in result["entries"]] == [1, 2]
+    saved = tools.word_save_report(doc_id, "toc-filled.docx")
+    xml = _read_zip_xml(Path(saved["saved_to"]), "word/document.xml")
+    assert "请根据文件内容，自行加入目录" not in xml
+    assert "TOC" in xml
+    assert 'w:outlineLvl w:val="0"' in xml
+
+
+def test_finalize_document_applies_format_plan_and_page_numbering(tmp_path):
+    document = Document()
+    document.add_paragraph("第一章")
+    document.add_paragraph("第一节")
+    document.add_paragraph("请根据文件内容，自行加入目录")
+    document.add_section()
+    source = tmp_path / "finalize-template.docx"
+    document.save(source)
+    doc_id = tools.word_open_report(str(source))["doc_id"]
+
+    result = tools.word_finalize_document(
+        doc_id,
+        anchor_paragraph_index=2,
+        entries=[
+            {"paragraph_index": 0, "level": 1},
+            {"paragraph_index": 1, "level": 2},
+        ],
+        format_plan={
+            "levels": {
+                "1": {"font_name": "黑体", "font_size": 16, "bold": True},
+                "2": {"font_name": "宋体", "font_size": 14, "bold": True},
+            },
+            "toc": {"levels_min": 1, "levels_max": 2},
+        },
+        page_start_section_index=1,
+    )
+
+    assert result["page_start_section_index"] == 1
+    saved = tools.word_save_report(doc_id, "finalized.docx")
+    xml = _read_zip_xml(Path(saved["saved_to"]), "word/document.xml")
+    assert "TOC" in xml
+    assert 'w:pgNumType w:start="1"' in xml
+    assert 'w:eastAsia="黑体"' in xml
 
 
 def test_open_report_round_trips_an_existing_file():
@@ -1106,6 +1175,8 @@ def test_list_blocks_reports_paragraph_indexes_and_table_grid(tmp_path):
     tables = [b for b in result["blocks"] if b["type"] == "table"]
     assert paragraphs[0]["index"] == 0
     assert paragraphs[0]["text"] == "标段名称："
+    assert paragraphs[0]["runs"][0]["run_index"] == 0
+    assert paragraphs[0]["runs"][0]["underline"] is False
     assert paragraphs[0]["runs"][0]["font_name"] == "仿宋_GB2312"
     assert tables[0]["index"] == 0
     assert tables[0]["grid"] == [["费率：", "%"]]
@@ -1199,6 +1270,99 @@ def test_replace_text_rejects_out_of_range_paragraph(tmp_path):
         tools.word_replace_text(doc_id, "标段名称：", "x", paragraph_index=99)
 
     assert "paragraph_index" in str(excinfo.value)
+
+
+def test_fill_underline_keeps_width_and_underline(tmp_path):
+    document = Document()
+    paragraph = document.add_paragraph()
+    WordFormatter.set_run_font(
+        paragraph.add_run("地址："), cn_font="宋体", size=10.5)
+    blank = paragraph.add_run(" " * 24)
+    blank.font.name = "宋体"
+    blank.font.size = 10.5
+    blank.font.underline = True
+    source = tmp_path / "underline.docx"
+    document.save(source)
+    doc_id = tools.word_open_report(str(source))["doc_id"]
+
+    blocks = tools.word_list_blocks(doc_id)["blocks"]
+    assert blocks[0]["runs"][1]["run_index"] == 1
+    assert blocks[0]["runs"][1]["underline"] is True
+
+    result = tools.word_fill_underline(
+        doc_id, paragraph_index=0, run_index=1, new="河北省雄安新区金湖街88号")
+
+    assert result["replacement"].startswith(" ")
+    assert result["replacement"].endswith(" ")
+    assert len(result["replacement"]) == result["original_length"]
+    assert result["paragraph_text"] == "地址：" + result["replacement"]
+    saved = tools.word_save_report(doc_id, "underline-filled.docx")
+    xml = _read_zip_xml(Path(saved["saved_to"]), "word/document.xml")
+    assert "河北省雄安新区金湖街88号" in xml
+    assert "<w:u " in xml
+
+
+def test_fill_underline_rejects_non_blank_run(tmp_path):
+    document = Document()
+    document.add_paragraph("地址：")
+    source = tmp_path / "visible.docx"
+    document.save(source)
+    doc_id = tools.word_open_report(str(source))["doc_id"]
+
+    with pytest.raises(ToolError) as excinfo:
+        tools.word_fill_underline(doc_id, paragraph_index=0, run_index=0, new="x")
+
+    assert "不是空白空位" in str(excinfo.value)
+
+
+def test_fill_underline_works_in_table_cell(tmp_path):
+    document = Document()
+    table = document.add_table(rows=1, cols=1)
+    paragraph = table.cell(0, 0).paragraphs[0]
+    blank = paragraph.add_run(" " * 6)
+    blank.font.underline = True
+    paragraph.add_run("元")
+    source = tmp_path / "cell-underline.docx"
+    document.save(source)
+    doc_id = tools.word_open_report(str(source))["doc_id"]
+
+    result = tools.word_fill_underline(
+        doc_id,
+        table_index=0,
+        row=0,
+        col=0,
+        run_index=0,
+        new="128000",
+        trailing_spaces=0,
+    )
+
+    assert result["replacement"] == " 128000"
+    assert result["table_index"] == 0
+    assert result["row"] == 0 and result["col"] == 0
+
+
+def test_replace_underline_text_keeps_visible_placeholder_format(tmp_path):
+    document = Document()
+    paragraph = document.add_paragraph()
+    run = paragraph.add_run("    （招标项目名称、招标编号）    ")
+    run.font.underline = True
+    source = tmp_path / "underline-placeholder.docx"
+    document.save(source)
+    doc_id = tools.word_open_report(str(source))["doc_id"]
+
+    result = tools.word_replace_underline_text(
+        doc_id,
+        paragraph_index=0,
+        run_index=0,
+        old="（招标项目名称、招标编号）",
+        new="项目名称、RXZB-2026-1026",
+    )
+
+    assert result["replacement"] == "    项目名称、RXZB-2026-1026    "
+    saved = tools.word_save_report(doc_id, "underline-placeholder-filled.docx")
+    xml = _read_zip_xml(Path(saved["saved_to"]), "word/document.xml")
+    assert "项目名称、RXZB-2026-1026" in xml
+    assert "<w:u " in xml
 
 
 def test_insert_cell_image_puts_picture_into_cell(tmp_path):

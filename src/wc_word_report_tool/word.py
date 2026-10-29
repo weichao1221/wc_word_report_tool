@@ -9,7 +9,7 @@
 3. **默认合理**：默认值贴近中国公文标准（仿宋_GB2312、三号 14pt、1.5 倍行距）。
 4. **严格校验**：未知参数抛 ValueError 而非静默降级，便于调试。
 
-版本：v0.8.0
+版本：v0.8.3
 作者：willcha
 """
 
@@ -2724,6 +2724,162 @@ class WordFormatter:
         self._append_field_run(toc_par, instruction)
         return toc_par
 
+    def insert_toc(
+        self,
+        anchor,
+        entries: list[dict],
+        *,
+        levels: tuple[int, int] = (1, 3),
+        toc_level_styles: dict[int, dict] | None = None,
+        use_hyperlinks: bool = True,
+        hide_page_numbers_in_web: bool = True,
+        use_outline_levels: bool = True,
+    ):
+        """在指定锚点处插入 Word 目录域，并设置目录项的大纲级别。
+
+        该方法是模板填充场景的目录入口：AI 先根据文档内容识别章节段落和层级，
+        再传入 ``entries``。方法会为这些段落设置 outline level，并在锚点位置
+        用 TOC 域替换锚点文字。目录页码需在 Word/OnlyOffice 中刷新域后显示。
+
+        :param anchor: 被 TOC 域替换的锚点段落。
+        :param entries: 形如 ``[{"paragraph_index": 25, "level": 1}, ...]`` 的目录项。
+        :param levels: TOC 收集的大纲层级范围。
+        :param toc_level_styles: 各级 TOC 样式配置。
+        :param use_hyperlinks: 是否生成超链接。
+        :param hide_page_numbers_in_web: 网页模式是否隐藏页码。
+        :param use_outline_levels: 是否按 outline level 收集目录项。
+        """
+        min_level, max_level = levels
+        if min_level < 1 or max_level < min_level:
+            raise ValueError("levels 参数不合法，例如 (1, 3)")
+
+        normalized = []
+        for item in entries or []:
+            paragraph_index = int(item.get("paragraph_index"))
+            level = int(item.get("level", 1))
+            if level < min_level or level > max_level:
+                raise ValueError(
+                    f"目录项层级 {level} 超出范围 {min_level}-{max_level}"
+                )
+            if paragraph_index < 0 or paragraph_index >= len(self.doc.paragraphs):
+                raise IndexError(
+                    f"目录项段落下标 {paragraph_index} 超出范围"
+                    f"（共 {len(self.doc.paragraphs)} 段）"
+                )
+            paragraph = self.doc.paragraphs[paragraph_index]
+            p_pr = paragraph._p.get_or_add_pPr()
+            outline = p_pr.find(qn("w:outlineLvl"))
+            if outline is None:
+                outline = OxmlElement("w:outlineLvl")
+                p_pr.append(outline)
+            outline.set(qn("w:val"), str(level - 1))
+            normalized.append({"paragraph_index": paragraph_index, "level": level})
+
+        self._ensure_update_fields_on_open()
+        if toc_level_styles:
+            for level, options in toc_level_styles.items():
+                self.set_toc_level_style(level, **options)
+
+        switches = [
+            f'\\o "{min_level}-{max_level}"',
+            "\\h" if use_hyperlinks else "",
+            "\\z" if hide_page_numbers_in_web else "",
+            "\\u" if use_outline_levels else "",
+        ]
+        instruction = f'TOC {" ".join(item for item in switches if item)}'
+        toc_par = self.doc.add_paragraph("")
+        self._append_field_run(toc_par, instruction)
+        anchor._p.addprevious(toc_par._p)
+        anchor._p.getparent().remove(anchor._p)
+        return toc_par, normalized
+
+    def finalize_document(
+        self,
+        anchor,
+        entries: list[dict],
+        format_plan: dict,
+        *,
+        page_start_section_index: int = 0,
+        start_page_number: int = 1,
+        number_format: str = "decimal",
+        prefix: str = "",
+        suffix: str = "",
+    ):
+        """统一整理文档目录、标题层级格式和分节页码。
+
+        AI 应根据 ``describe_format_profile()`` 和正文结构生成 ``format_plan``。
+        本方法只规范化目录中识别出的标题段落，不重写表格和普通正文，避免破坏
+        原模板的特殊版式。
+
+        ``format_plan`` 示例::
+
+            {
+              "levels": {
+                "1": {"font_name": "宋体", "font_size": 16, "bold": true},
+                "2": {"font_name": "宋体", "font_size": 14, "bold": true}
+              },
+              "toc": {"levels_min": 1, "levels_max": 2}
+            }
+        """
+        level_plan = {
+            int(level): dict(options or {})
+            for level, options in (format_plan.get("levels") or {}).items()
+        }
+
+        paragraphs = self.doc.paragraphs
+        normalized = []
+        for item in entries or []:
+            paragraph_index = int(item.get("paragraph_index"))
+            level = int(item.get("level", 1))
+            if paragraph_index < 0 or paragraph_index >= len(paragraphs):
+                raise IndexError(
+                    f"目录项段落下标 {paragraph_index} 超出范围"
+                    f"（共 {len(paragraphs)} 段）"
+                )
+            paragraph = paragraphs[paragraph_index]
+            options = level_plan.get(level, {})
+            font_name = str(options.get("font_name") or "宋体")
+            font_size = options.get("font_size", 14)
+            bold = bool(options.get("bold", True))
+            for run in paragraph.runs:
+                self.set_run_font(
+                    run,
+                    cn_font=font_name,
+                    size=font_size,
+                    bold=bold,
+                )
+            self.set_paragraph_format(
+                paragraph,
+                line_spacing=float(options.get("line_spacing") or 1.5),
+                space_before=float(options.get("space_before") or 0),
+                space_after=float(options.get("space_after") or 0),
+            )
+            normalized.append({"paragraph_index": paragraph_index, "level": level})
+
+        toc_options = dict(format_plan.get("toc") or {})
+        min_level = int(toc_options.get("levels_min") or 1)
+        max_level = int(toc_options.get("levels_max") or 3)
+        toc_par, toc_entries = self.insert_toc(
+            anchor,
+            normalized,
+            levels=(min_level, max_level),
+            use_hyperlinks=bool(toc_options.get("use_hyperlinks", True)),
+        )
+        self.set_page_number_from_section(
+            int(page_start_section_index),
+            start=int(start_page_number),
+            prefix=prefix,
+            suffix=suffix,
+            number_format=number_format,
+        )
+        return {
+            "toc_paragraph": toc_par,
+            "entries": toc_entries,
+            "format_plan": level_plan,
+            "page_start_section_index": int(page_start_section_index),
+            "start_page_number": int(start_page_number),
+        }
+
     # ================================================================
     # 8. 模板填充（在已有内容上原位改写）
     # ================================================================
@@ -2808,13 +2964,14 @@ class WordFormatter:
 
     @staticmethod
     def _run_font_info(paragraph, run) -> dict:
-        """读取 run 实际生效的字体（中文字体名、字号 pt、是否加粗）。"""
+        """读取 run 实际生效的字体和直接格式。"""
         name, size = WordFormatter._effective_font(paragraph, run)
         return {
             "text": run.text,
             "font_name": name,
             "font_size_pt": round(size.pt, 2) if size is not None else None,
             "bold": run.font.bold is True,
+            "underline": bool(run.font.underline),
         }
 
     @staticmethod
@@ -2889,7 +3046,10 @@ class WordFormatter:
                 "index": index,
                 "text": self._truncate(item.text, max_text_chars),
                 "style": item.style.name if item.style is not None else None,
-                "runs": [self._run_font_info(item, run) for run in item.runs],
+                "runs": [
+                    {"run_index": run_index, **self._run_font_info(item, run)}
+                    for run_index, run in enumerate(item.runs)
+                ],
             })
         return blocks
 
@@ -3067,6 +3227,87 @@ class WordFormatter:
         if enabled:
             run.font.highlight_color = WD_COLOR_INDEX.YELLOW
         return run
+
+    @staticmethod
+    def fill_underline(
+        paragraph,
+        run_index: int,
+        value: str,
+        *,
+        trailing_spaces: int | None = None,
+    ) -> dict:
+        """填写由带下划线空格组成的模板空位，并保留原空位宽度。
+
+        招投标模板常把填空线画成一串带下划线的空格。直接把值追加到段尾会跑到
+        下划线外面；这里要求 ``run_index`` 精确指向该空白 run，并把它改成
+        ``一个前导空格 + 值 + 补齐原宽度的尾随空格``。run 原有的字体、字号和
+        下划线格式都会保留。
+
+        :param paragraph: 目标段落。
+        :param run_index: 下划线空白在 ``paragraph.runs`` 中的下标。
+        :param value: 要填入的业务值；前后空格由方法自动处理。
+        :return: 原长度、替换文本和保留的尾随空格数。
+        """
+        value = str(value or "").strip()
+        if not value:
+            raise ValueError("下划线空位要填写的值不能为空")
+
+        runs = paragraph.runs
+        if run_index < 0 or run_index >= len(runs):
+            raise IndexError(
+                f"run_index {run_index} 超出范围（该段共 {len(runs)} 个 run）"
+            )
+        run = runs[run_index]
+        original = str(run.text or "")
+        if not original.strip():
+            if not run.underline:
+                raise ValueError(f"run_index {run_index} 不是带下划线的空白 run")
+        else:
+            raise ValueError(f"run_index {run_index} 含有可见文字，不是空白空位")
+
+        if trailing_spaces is None:
+            trailing_spaces = max(1, len(original) - len(value) - 1)
+        trailing_spaces = max(0, int(trailing_spaces))
+        replacement = " " + value + " " * trailing_spaces
+        run.text = replacement
+        return {
+            "run_index": run_index,
+            "original_length": len(original),
+            "replacement": replacement,
+            "trailing_spaces": trailing_spaces,
+        }
+
+    @staticmethod
+    def replace_underline_text(
+        paragraph,
+        run_index: int,
+        old: str,
+        new: str,
+    ) -> dict:
+        """替换带下划线 run 里的可见占位文字，并保留原有下划线格式。"""
+        runs = paragraph.runs
+        if run_index < 0 or run_index >= len(runs):
+            raise IndexError(
+                f"run_index {run_index} 超出范围（该段共 {len(runs)} 个 run）"
+            )
+        run = runs[run_index]
+        original = str(run.text or "")
+        if not run.underline:
+            raise ValueError(f"run_index {run_index} 没有下划线格式")
+        old = str(old or "")
+        new = str(new or "").strip()
+        if not old or old not in original:
+            raise ValueError(f"下划线 run 里没有找到占位文字 {old!r}")
+        if not new:
+            raise ValueError("new 不能为空")
+        replacement = original.replace(old, new, 1)
+        run.text = replacement
+        return {
+            "run_index": run_index,
+            "old": old,
+            "new": new,
+            "replacement": replacement,
+        }
 
     @staticmethod
     def replace_text(paragraph, old: str, new: str, *, count: int = 1,

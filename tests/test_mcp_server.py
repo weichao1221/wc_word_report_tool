@@ -18,7 +18,7 @@ import pytest
 
 pytest.importorskip("mcp")
 
-from wc_word_report_tool.mcp.server import build_server, load_server_class
+from wc_word_report_tool.mcp.server import build_server
 
 EXPECTED_TOOLS = {
     "word_create_report",
@@ -46,6 +46,8 @@ EXPECTED_TOOLS = {
     "word_list_blocks",
     "word_describe_format_profile",
     "word_replace_text",
+    "word_fill_underline",
+    "word_replace_underline_text",
     "word_insert_cell_image",
     "word_set_header",
     "word_set_footer",
@@ -62,6 +64,8 @@ EXPECTED_TOOLS = {
     "word_set_page_number_start",
     "word_set_page_number_format",
     "word_add_toc",
+    "word_insert_toc",
+    "word_finalize_document",
     "word_set_toc_level_style",
     "word_set_paragraph_style",
     "word_add_custom_heading",
@@ -89,11 +93,6 @@ def _schemas():
 
 def test_expected_tool_surface_is_registered():
     assert {tool.name for tool in _list_tools()} == EXPECTED_TOOLS
-
-
-def test_server_class_detection_returns_known_major():
-    _, major = load_server_class()
-    assert major in (1, 2)
 
 
 def test_server_rejects_non_loopback_host():

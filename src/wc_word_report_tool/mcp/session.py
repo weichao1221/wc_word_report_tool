@@ -153,7 +153,7 @@ class Session:
 class SessionStore:
     """``doc_id -> Session`` 的内存表，带 TTL 回收和串行锁。
 
-    锁的意义：FastMCP 把同步工具函数放在线程池执行，并发调用会同时改写同一个
+    锁的意义：MCPServer 把同步工具函数放在线程池执行，并发调用会同时改写同一个
     ``Document``。文档构建本身就该串行，因此用一把全局可重入锁即可。
     """
 

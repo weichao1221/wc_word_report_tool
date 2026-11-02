@@ -1,11 +1,11 @@
 # wc_word_report_tool [![PyPI Downloads](https://static.pepy.tech/personalized-badge/wc-word-report-tool?period=total&units=INTERNATIONAL_SYSTEM&left_color=BLACK&right_color=GREEN&left_text=downloads)](https://pepy.tech/projects/wc-word-report-tool)
 
-基于 `python-docx` 的中文 Word 报告格式化工具，内置：
+基于 `zipfile + lxml` 直接操作 OOXML 的中文 Word 报告格式化工具，内置：
 
 1. **数字转中文大写**：`number_to_chinese_upper()` 把数字转成人民币金额大写。
 2. **Word 格式化**：`WordFormatter` 提供从封面、正文、表格、页眉页脚到目录、页码的完整覆盖，默认值贴近中国公文标准。
 
-> 版本：v0.8.3
+> 版本：v0.8.4
 > 作者：willcha
 > 许可证：MIT
 > Python：>=3.9
@@ -54,11 +54,10 @@ formatter.add_toc()
 ### 完整报告骨架
 
 ```python
-from docx import Document
 from wc_word_report_tool import WordFormatter
 
-doc = Document()
-formatter = WordFormatter(doc)
+formatter = WordFormatter()
+doc = formatter.doc
 
 # 1. 文档级设置
 formatter.setup_defaults()
@@ -125,7 +124,7 @@ doc.save("demo.docx")
 | `created_time(value, *, font_name, font_size, bold)` | 数字日期文本，默认右对齐 |
 | `chinese_date(value, *, font_name, font_size, bold, alignment)` | 中文完整日期，默认居中 |
 | `chinese_year_month(value, *, font_name, font_size, bold, alignment)` | 中文年月，默认居中 |
-| `insert_img(image, width=None, *, height=None, alignment, floating, y_offset_pt)` | 插入图片；可传路径或 `bytes`，宽高都省略时按图片自身 DPI 使用原始尺寸 |
+| `insert_img(image, width=None, *, height=None, alignment, floating, y_offset_pt, paragraph_index, wrap_type)` | 插入图片；可传路径或 `bytes`，可指定段落坐标和七种环绕方式，宽高都省略时按图片自身 DPI 使用原始尺寸 |
 
 `heading()` 的 `alignment` / `space_before` / `space_after` 写在**段落**上而不是标题样式上，
 因此同级的居中标题与居左标题不会互相串味。
@@ -136,13 +135,17 @@ doc.save("demo.docx")
 formatter.insert_img(cropped_bytes)              # 按原图 DPI 自动定宽
 formatter.insert_img("scan.png", width=15)       # 指定宽度，高度等比
 formatter.insert_img("scan.png", height=8)       # 指定高度，宽度等比
+formatter.insert_img("photo.png", width=10, paragraph_index=125)  # 插在该段之后
+formatter.insert_img("photo.png", width=10, wrap_type="四周型环绕")
 ```
 
-`floating=True` 让图片浮于文字上方，用于**印章压落款**、以及 PDF 里裁出来的图表与公式：
+`wrap_type` 支持“嵌入型、四周型环绕、紧密型环绕、穿越型环绕、上下型环绕、
+衬于文字下方、衬于文字上方”。旧的 `floating=True` 等价于“衬于文字上方”：
 
 ```python
 formatter.body("落款：某某公司")
 formatter.insert_img("seal.png", 3.5, alignment="居右", floating=True, y_offset_pt=6)
+formatter.insert_img("seal.png", 3.5, alignment="居右", wrap_type="衬于文字上方")
 # 印章浮在落款文字之上，不会被排版推着走
 ```
 
@@ -195,7 +198,7 @@ formatter.qianfaye(
 |------|------|
 | `add_table(headers, rows, *, col_widths, font_size, font_name, header_bold, alignment, border_color, border_size, merges, row_heights, table_width_cm, cell_font_names)` | 一站式创建带表头表格；支持合并单元格、行高、总宽、逐格字体 |
 | `merge_cells(table, merges)` | 对已存在的表格合并单元格（只保留区域左上角内容） |
-| `set_cell(cell, text, *, font_name, font_size, bold, alignment, line_spacing)` | 设置单元格格式（支持加粗/对齐） |
+| `set_cell(cell, text, *, font_name, en_font, font_size, bold, alignment, line_spacing)` | 设置单元格格式；`en_font` 可单独指定西文字体，要求整格同字体时传与 `font_name` 相同 |
 | `set_table_borders(table, *, color, size)` | 为表格添加边框 |
 | `set_table_width(table, width_cm)` | 设置表格总宽度 |
 
@@ -240,16 +243,51 @@ merges=[(1, 2, 1, 2)]        # (row, col, rowspan, colspan)
 | 方法 | 用途 |
 |------|------|
 | `describe_blocks(*, include_empty, max_text_chars)` | 列出正文块（段落 / 表格）及下标、文本、run 下标、字体字号和下划线状态 |
-| `replace_text(paragraph, old, new, *, count, highlight)` | 在已有段落里原位替换，**沿用原 run 的字体字号** |
-| `fill_underline(paragraph, run_index, value)` | 填写带下划线的空白 run，自动保留左右空格、原宽度和下划线格式 |
-| `insert_cell_image(cell, image_path, *, width, height, alignment, keep_text)` | 把图片贴进表格单元格（证件照、印章） |
+| `replace_text(paragraph, old, new, *, count, highlight, track_changes, revision_author)` | 在已有段落里原位替换，**沿用原 run 的字体字号** |
+| `fill_underline(paragraph, run_index, value, *, trailing_spaces, track_changes, revision_author)` | 填写带下划线的空白 run，自动保留左右空格、原宽度和下划线格式 |
+| `replace_underline_text(paragraph, run_index, old, new, *, …, track_changes, revision_author)` | 替换下划线 run 里**有可见文字**的占位 |
+| `set_cell(cell, text, *, …, track_changes, revision_author)` / `edit_cell(table, context, row, col, *, …, track_changes, revision_author)` | 改写单元格内容（`edit_cell` 支持多行） |
+| `insert_cell_image(cell, image_path, *, width, height, alignment, keep_text, track_changes, revision_author)` | 把图片贴进表格单元格（证件照、印章） |
+| `merge_cells(table, merges, *, track_changes)` | 合并单元格（结构变更，始终直接合并） |
+
+### 审阅模式（修订记录）
+
+上面这些**原位改写**方法都有一个 `track_changes` 参数，**默认 `True`**：
+旧内容记成 OOXML 标准的 `w:del` 修订删除、新内容记成 `w:ins` 修订插入，
+并带上 `w:author` / `w:date`。这套记录是三种软件共同支持的最小集：
+
+* **Office / WPS**：打开后「审阅 → 修订」面板能看到是谁改了什么，可逐条接受或拒绝；
+* **OnlyOffice**：打开后「审阅 → 更改」里同样能看到、接受或拒绝。
+
+刻意**不写** `w:rPrChange` / `w:tcPrChange` / `w:cellMerge` 这类格式与结构修订——
+各家支持度差异大，而且「内容改写」并不需要它们。
 
 ```python
-from docx import Document
+# 默认：留下修订记录，方便人工复核
+formatter.replace_text(doc.paragraphs[37], "标段名称：", "标段名称：一标段")
+
+# 修订记录里的作者（默认「AI 助手」）
+formatter.replace_text(par, "标段名称：", "标段名称：一标段", revision_author="张三")
+
+# 直接覆盖、不留痕迹
+formatter.replace_text(par, "标段名称：", "标段名称：一标段", track_changes=False)
+```
+
+因为插入内容包在 `w:ins` 里，高层 `paragraph.text` / `paragraph.runs`
+读不到它们。需要看「当前生效的文字」时用：
+
+```python
+WordFormatter.visible_text(paragraph)      # 段落：已删除的不算，已插入的算
+WordFormatter.visible_cell_text(cell)      # 单元格，按段落换行拼接
+```
+
+`describe_blocks()` 已经改用可见文字，所以填完模板再读结构不会看到旧占位。
+
+```python
 from wc_word_report_tool import WordFormatter
 
-doc = Document("投标文件格式.docx")
-formatter = WordFormatter(doc)
+formatter = WordFormatter("投标文件格式.docx")
+doc = formatter.doc
 
 # 1. 先看清有哪些段落、哪些格子
 for block in formatter.describe_blocks():
@@ -518,6 +556,47 @@ describe_font_size(11)    # {"pt": 11.0, "font_size": "五号", "exact": False, 
 
 ## 版本说明
 
+### v0.8.4
+
+> 本版是 **0.8.3 → 0.8.4** 的一次大改动。最需要注意的是**底层引擎换了**：
+> 不再依赖 python-docx，改为自研 OOXML 实现，因此**高层方法返回的对象类型变了**。
+
+- **底层引擎切换（本次主要改动）**：生产代码完全移除 python-docx，改用 `zipfile` 和 `lxml`
+  直接读取、修改和保存 OOXML；wheel 只依赖 `lxml`，安装不再拉入 python-docx。
+- **公共构造方式调整（不兼容点）**：`WordFormatter()` 可创建空白文档，也可传 DOCX 路径或
+  bytes；原有高层方法保持同名，但**返回对象改为内部 OOXML 对象**。
+  直接依赖 python-docx 类型（例如 `docx.Document`、`docx.shared.Pt`）的代码需要相应调整。
+- **任意模板保真**：打开并回写现有 DOCX 时保留未修改的 XML 部件、媒体、关系和
+  未知扩展；真实业务模板及七种图片环绕已用 WPS 转换结果和结构测试验证。
+- **七种图片环绕**：`insert_img()` / `word_insert_image` 新增 `wrap_type`，
+  支持嵌入型、四周型、紧密型、穿越型、上下型、衬于文字下方和衬于文字上方；
+  `floating` 作为兼容参数继续可用。
+- **审阅模式（修订记录）**：原位改写方法新增 `track_changes`（默认开启）与
+  `revision_author`，旧内容记为 `w:del`、新内容记为 `w:ins`，Office / WPS /
+  OnlyOffice 的审阅面板都能逐条接受或拒绝；因为插入内容包在 `w:ins` 里，
+  读“当前生效文字”要用新增的 `visible_text()` / `visible_runs()`。
+- **属性写入修复**：`run.italic` / `font.italic` / `font.all_caps` /
+  `paragraph_format.keep_together` / `widow_control` / `line_spacing_rule`
+  此前赋值既不生效也不报错，现已正确写入；`pPr` / `rPr` / `tcPr` / `trPr` /
+  `sectPr` 的子元素按 ECMA-376 顺序插入；`False` 写入 `w:val="0"`，
+  所以段落上的显式关闭能覆盖样式继承的开启。
+- **补齐常用对象方法**：`run.underline` 可赋值、`run.add_tab()`、
+  `paragraph.insert_paragraph_before()`、`document.add_picture()` 与
+  `document.inline_shapes`、`document.comments`（含 `add_comment`，与 python-docx
+  双向可读）、`document.save()` 同时接受路径与二进制流。另补齐 19 个字符级开关（`strike` / `small_caps` /
+  `hidden` / `subscript` / `superscript` 等）、`run.clear()`、
+  `contains_page_break`、`iter_inner_content()`、`section.start_type`、
+  `cell.grid_span`、`table.table_direction` 与 `element` / `part` 访问器。
+- **MCP 工具新增 3 个**（总数 54 → 57）：`word_format_run`（删除线、双删除线、小型大写、
+  上下标、隐藏文字、阳文/阴文、空心、阴影、对齐网格、从右到左、不做拼写检查、复杂文种等
+  字符级开关，只改显式传入的字段并回显结果）、`word_set_table_direction`
+  （ltr / rtl / inherit）、`word_set_section_start_type`
+  （nextPage / oddPage / evenPage / continuous / nextColumn）。
+- **修复批注部件解析**：批注部件改为按 `comments` 关系解析，而不是固定按
+  `word/comments.xml` 查找。此前遇到合并工具产出的 `word/comments1.xml` 会读不到批注，
+  写入时还会多加一条 comments 关系，导致 python-docx 拒绝打开该文档。
+- **Python 版本**：主库仍支持 3.9；MCP 服务端需要 3.10 及以上。
+
 ### v0.8.3
 
 - **模板目录插入**：新增 `WordFormatter.insert_toc()` 和 MCP 工具
@@ -612,7 +691,7 @@ describe_font_size(11)    # {"pt": 11.0, "font_size": "五号", "exact": False, 
   的模板空位。值会写成「前导空格 + 内容 + 补足原宽度的尾随空格」，
   run 原有的字体、字号和 underline 不变。
 - **`insert_cell_image(cell, image_path, *, width, height, alignment, keep_text)`**：
-  把图片贴进表格单元格。`insert_img()` 只能往正文追加，落不进已有格子，
+  把图片贴进表格单元格。`insert_img()` 的 `paragraph_index` 只定位正文段落，落不进已有格子，
   而身份证、营业执照、印章在表单里恰恰是「贴进格子」的。
 - 对应 MCP 工具：`word_list_blocks`、`word_replace_text`、`word_fill_underline`、
   `word_replace_underline_text`、`word_insert_toc`、`word_finalize_document`、
@@ -717,7 +796,8 @@ describe_font_size(11)    # {"pt": 11.0, "font_size": "五号", "exact": False, 
 
 - 新增 **MCP 服务端**（可选依赖 `mcp`），把 `WordFormatter` 的完整能力暴露成 AI 可调用的工具。
 - 新增命令 `wc-report-mcp`，支持 `stdio` 与 `streamable-http` 两种传输。
-- 主库依赖不变（仍只有 `python-docx`），MCP 依赖通过 `pip install wc_word_report_tool[mcp]` 安装。
+- 主库依赖为 `lxml`，DOCX 打包使用标准库 `zipfile`；MCP 依赖通过
+  `pip install wc_word_report_tool[mcp]` 安装。
 - 修复 `tests/test_word_formatter.py` 中残留的旧 API 测试，测试套件恢复全绿。
   注意：v0.4.3 已移除的旧方法名（`Heading_1`、`Normal_doc`、`set_all_layout` 等）
   不再提供兼容层，相关测试已删除。
@@ -742,7 +822,7 @@ describe_font_size(11)    # {"pt": 11.0, "font_size": "五号", "exact": False, 
 
 ## 注意事项
 
-1. **目录刷新**：`python-docx` 可写入 TOC 域，但目录内容需在 Word/OnlyOffice 打开后刷新（F9 或右键 → 更新域）才会显示页码。
+1. **目录刷新**：本工具可写入 TOC 域，但目录内容需在 Word/OnlyOffice 打开后刷新（F9 或右键 → 更新域）才会显示页码。
 2. **页码分节**：从某页开始重新编号本质上是"从某个分节开始重新编号"。建议在正文起、附录起等关键节点显式插入分节。
 3. **字体可用性**：默认字体 `仿宋_GB2312` / `楷体` / `黑体` 在 Windows 上预装；macOS / Linux 可能需要额外安装或回退到 `仿宋` / `STKaiti` / `SimHei`。
 
@@ -816,8 +896,15 @@ word_insert_cell_image        → 证件照贴进表格单元格
 word_save_report              → 存到目标路径（建议传绝对路径）
 ```
 
-`word_add_body` / `word_add_body_list` / `word_insert_image` 都是**往文档末尾追加**，
-在模板上误用会把内容写到最后一页，而不是填进占位处。
+`word_add_body` / `word_add_body_list` 只**往文档末尾追加**。`word_insert_image`
+不传 `paragraph_index` 时也追加到末尾；传了才按 `word_list_blocks` 的段落坐标插入。
+
+模板填充这条路上的改写工具（`word_replace_text`、`word_fill_underline`、
+`word_replace_underline_text`、`word_format_cell`、`word_insert_cell_image`、
+以及兜底 `word_call` 调到的 `set_cell` / `edit_cell`）都带 `track_changes`
+（默认 `true`）和 `revision_author`（默认 `AI 助手`）。默认会在文档里留下
+`w:ins` / `w:del` 修订记录，Office、WPS、OnlyOffice 的审阅面板都能逐条接受或拒绝；
+需要直接覆盖时传 `track_changes: false`。
 
 **读取格式另有一条路**（照着一份现成 `.docx` 复刻版式）：
 
@@ -837,11 +924,12 @@ word_describe_format_profile  → 读取标题/正文样式、页面、页眉页
 | 会话 | `word_create_report`、`word_open_report`、`word_save_report`、`word_close_report`、`word_describe_report` |
 | 文档级设置 | `word_set_default_font`、`word_set_page_margins`、`word_set_document_language` |
 | 段落与标题 | `word_add_heading`、`word_add_body`、`word_add_body_list`、`word_add_blank_lines`、`word_add_cover_text`、`word_add_right_text`、`word_add_date`、`word_insert_image` |
-| 表格 | `word_add_table`、`word_merge_cells`、`word_format_cell`、`word_set_table_borders` |
+| 表格 | `word_add_table`、`word_merge_cells`、`word_format_cell`、`word_set_table_borders`、`word_set_table_direction` |
+| 字符级格式 | `word_format_run`（删除线、双删除线、小型大写、上下标、隐藏文字、阳文/阴文、空心、阴影、对齐网格、从右到左、不做拼写检查、复杂文种等） |
 | 模板填充 | `word_list_blocks`、`word_replace_text`、`word_fill_underline`、`word_replace_underline_text`、`word_insert_toc`、`word_finalize_document`、`word_insert_cell_image` |
 | 读取格式 | `word_describe_format_profile` |
 | 页眉页脚 | `word_set_header`、`word_set_footer`、`word_set_header_parts`、`word_set_footer_parts`、`word_set_different_first_page`、`word_set_different_odd_even`、`word_clear_header_footer`、`word_set_header_image` |
-| 节与页码 | `word_insert_section`、`word_set_section_page`、`word_set_page_numbers`、`word_restart_page_numbering`、`word_set_page_number_start`、`word_set_page_number_format` |
+| 节与页码 | `word_insert_section`、`word_set_section_page`、`word_set_section_start_type`、`word_set_page_numbers`、`word_restart_page_numbering`、`word_set_page_number_start`、`word_set_page_number_format` |
 | 目录与样式 | `word_add_toc`、`word_set_toc_level_style`、`word_set_paragraph_style`、`word_add_custom_heading` |
 | 模板化组合 | `word_add_cover_page`、`word_add_signature_page` |
 | 独立工具 | `word_rmb_upper`（数字转大写）、`word_convert_font_size`（pt ↔ 中文字号），都不需要 doc_id |
@@ -852,7 +940,8 @@ word_describe_format_profile  → 读取标题/正文样式、页面、页眉页
 `data:image/png;base64,...` 形式 —— 便于 AI 在拿不到本地文件路径时使用。
 
 `word_insert_image` 的 `width_cm` / `height_cm` 都可省略，此时按图片自身 DPI 使用原始尺寸，
-返回里的 `auto_sized` 会告诉 AI 走了哪条路径。
+返回里的 `auto_sized` 会告诉 AI 走了哪条路径。传 `paragraph_index` 时，图片作为新段落
+插在目标段落之后；不传时仍追加到文档末尾。
 
 `section_index` / `table_index` 默认 `-1`，表示最后一节 / 最后一个表格。
 
@@ -900,7 +989,7 @@ word_call(doc_id, "set_run_font", {
 
 ### 已知限制
 
-1. **目录页码需刷新**：TOC/PAGE 是 Word 域，`python-docx` 只能写入域代码、渲染不出页码。
+1. **目录页码需刷新**：TOC/PAGE 是 Word 域，本工具只能写入域代码、渲染不出页码。
    本工具会写入 `updateFields` 标记，Word / OnlyOffice 打开时会自动刷新（F9 可手动刷新）；
    LibreOffice / Google Docs 不保证。因此 AI 无法自行校验目录页码，生成后请人工打开确认。
 2. **字体依赖服务端机器**：默认的 `仿宋_GB2312` / `黑体` / `方正小标宋简体` 在 Windows 上预装，
@@ -912,14 +1001,21 @@ word_call(doc_id, "set_run_font", {
 
 ## 发布流程
 
-先在 PyPI 项目里配置 Trusted Publisher（GitHub 仓库
-`weichao1221/wc_word_report_tool`、工作流 `publish.yml`、环境 `pypi`），
-并在 GitHub 仓库创建同名 `pypi` environment。
+发布前统一更新 `pyproject.toml`、`wc_word_report_tool.__version__`、`word.py`
+和 README 中的版本号，运行 `./publish_to_pypi.sh` 做本地构建检查，
+然后提交并推送 `main`、创建 `vX.Y.Z` 标签（标签与包版本不一致时流程会失败）。
 
-发布前统一更新 `pyproject.toml`、`wc_word_report_tool.__version__`、README
-和 `word.py` 中的版本号，运行 `./publish_to_pypi.sh` 做本地构建检查。
-提交并推送 `main` 后创建 `vX.Y.Z` 标签；标签与包版本不一致时流程会失败，
-一致时测试通过后自动上传 PyPI。
+推标签会触发 `.github/workflows/publish.yml`，它依赖 PyPI 的 **Trusted Publisher**：
+需要先在 PyPI 项目里配置（GitHub 仓库 `weichao1221/wc_word_report_tool`、
+工作流 `publish.yml`、环境 `pypi`），并在 GitHub 仓库创建同名 `pypi` environment。
+
+> **现状提醒**：Trusted Publisher 尚未配置，`v0.7.6` / `v0.8.0` / `v0.8.3`
+> 三次标签推送都在发布步骤失败了（`invalid-publisher`）。在配好之前，请用本机
+> 凭据手动上传：
+>
+> ```bash
+> python3 -m twine upload dist/*
+> ```
 
 ## License
 

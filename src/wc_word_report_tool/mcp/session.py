@@ -19,8 +19,7 @@ import time
 import uuid
 from pathlib import Path
 
-from docx import Document
-
+from ..ooxml import Document
 from ..word import WordFormatter
 
 DEFAULT_OUTPUT_DIRNAME = "wc-reports"

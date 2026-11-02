@@ -20,7 +20,7 @@ from mcp.server.mcpserver import MCPServer
 
 from . import tools
 
-INSTRUCTIONS = """中文 Word 报告编制工具。用 python-docx 生成符合中国公文格式的报告。
+INSTRUCTIONS = """中文 Word 报告编制工具。直接操作 OOXML 生成符合中国公文格式的报告。
 
 ## 基本流程
 
@@ -46,11 +46,12 @@ INSTRUCTIONS = """中文 Word 报告编制工具。用 python-docx 生成符合�
    `word_replace_underline_text`
 4. 已有目录占位时，先 `word_describe_format_profile` 读取原格式，再通读结构；
    用 `word_finalize_document` 一次统一标题层级、目录和分节页码
-5. 证件照这类要贴进格子的图片用 `word_insert_cell_image`
+5. 证件照要贴进格子时用 `word_insert_cell_image`；正文照片用 `word_insert_image`
+   并传 `word_list_blocks` 给出的 `paragraph_index`
 6. `word_save_report` 存到目标路径（建议传绝对路径）
 
-注意：`word_add_body` / `word_add_body_list` / `word_insert_image` 都是**往文档末尾追加**，
-在模板上误用会把内容写到最后一页，而不是填进占位处。
+注意：`word_add_body` / `word_add_body_list` 只往文档末尾追加。`word_insert_image`
+不传 `paragraph_index` 时也追加到末尾；传了才插在目标段落之后。
 
 ## 读取格式（照着一份现成文档复刻版式）
 
@@ -73,6 +74,12 @@ INSTRUCTIONS = """中文 Word 报告编制工具。用 python-docx 生成符合�
   过去的（`delta_pt` 是差值）；正好落在两档正中间时用 `ties="larger"|"smaller"` 指定取向。
 - **对齐**支持 `"居中"` / `"两端对齐"` / `"居左"` / `"居右"`，也接受 `center` / `justify` / `left` / `right`。
 - **单位**：页边距、图片宽度、列宽是 cm；字号、段间距是 pt。
+- **字符级细节**：删除线、双删除线、小型大写、上下标、隐藏文字、阳文/阴文等用
+  `word_format_run`（先用 `word_list_blocks` 拿 `paragraph_index` 与 `run_index`，
+  只传你要改的字段；返回值里的 `format` 是改完后的实际格式）。
+- **表格方向**用 `word_set_table_direction`（ltr / rtl / inherit）。
+- **分节符类型**用 `word_set_section_start_type`（nextPage / oddPage / evenPage /
+  continuous / nextColumn）。
 - `section_index` / `table_index` 默认 `-1`，表示最后一节 / 最后一个表格。
 - MCP HTTP 仅允许绑定本机回环地址；当前版本没有认证和路径隔离。
 

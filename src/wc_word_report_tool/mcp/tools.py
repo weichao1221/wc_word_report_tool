@@ -19,15 +19,22 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Union
 
-from docx.text.paragraph import Paragraph
-
 from ..numbers import number_to_chinese_upper
+from ..ooxml import (
+    WD_SECTION_START,
+    WD_TABLE_DIRECTION,
+    Paragraph,
+    Pt,
+    RGBColor,
+    qn,
+)
 from ..word import (
     DEFAULT_CN_FONT,
     DEFAULT_EN_FONT,
     DEFAULT_HEADER_FOOTER_FONT,
     DEFAULT_HEADER_FOOTER_SIZE,
     WordFormatter,
+    _to_pt,
     describe_font_size,
 )
 from .api_help import formatter_api_text
@@ -261,7 +268,7 @@ def word_describe_report(doc_id: str) -> Dict[str, Any]:
     """
     with _op(doc_id, mark_dirty=False) as session:
         payload = _result(session)
-        # python-docx 的 Section 没有 paragraphs 属性，只能按节遍历正文内容
+        # 内部 Section 没有直接的 paragraphs 属性，只能按节遍历正文内容
         payload["paragraphs_per_section"] = [
             sum(
                 1
@@ -720,6 +727,8 @@ def word_insert_image(
     alignment: str = "居左",
     floating: bool = False,
     y_offset_pt: float = 0,
+    paragraph_index: Optional[int] = None,
+    wrap_type: Optional[str] = None,
 ) -> Dict[str, Any]:
     """插入一张图片到正文。
 
@@ -735,27 +744,40 @@ def word_insert_image(
         :param floating: 是否让图片浮于文字上方。印章要压在落款文字上时传 True，
                          从 PDF 裁出的图表、公式同理。
         :param y_offset_pt: 浮动图片的垂直偏移，单位 pt，正数上移、负数下移。
+        :param paragraph_index: 可选正文段落下标，取自 word_list_blocks，支持负数。
+                                给定时图片作为新段落插在该段之后；省略时追加到末尾。
+        :param wrap_type: 图片环绕方式，可选“嵌入型 / 四周型环绕 / 紧密型环绕 /
+                          穿越型环绕 / 上下型环绕 / 衬于文字下方 / 衬于文字上方”。
+                          显式传入时优先于 floating。
 
     AI 调用说明：
-    适用：把图片追加到正文末尾，例如独立插图、公章浮层。
+    适用：把图片插到指定正文段落之后，例如清单照片、独立插图和公章浮层。
     不要用于：贴入表格单元格；身份证、营业执照等用 word_insert_cell_image。
-    调用前后：图片参数使用 image_path 或 image_base64，二选一；后续内容继续追加。
+    调用前后：先 list_blocks 取得段落坐标，再传 paragraph_index；不传仍追加到末尾。
     失败处理：文件不存在、base64 无效或尺寸非法会失败；修正图片输入后重试。
     """
     with _op(doc_id) as session:
+        effective_wrap = WordFormatter.resolve_image_wrap_type(
+            wrap_type, floating=floating,
+        )
+        if paragraph_index is not None:
+            _paragraph(session, paragraph_index)
         path = materialize_image(
             session, image_path=image_path, image_base64=image_base64, label="正文图片",
         )
         session.formatter.insert_img(
             str(path), width_cm, height=height_cm, alignment=alignment,
             floating=floating, y_offset_pt=y_offset_pt,
+            paragraph_index=paragraph_index, wrap_type=wrap_type,
         )
         return _result(
             session,
             width_cm=width_cm,
             height_cm=height_cm,
             auto_sized=width_cm is None and height_cm is None,
-            floating=floating,
+            floating=effective_wrap != "嵌入型",
+            paragraph_index=paragraph_index,
+            wrap_type=effective_wrap,
         )
 
 
@@ -830,6 +852,7 @@ def word_merge_cells(
     doc_id: str,
     merges: List[Dict[str, int]],
     table_index: int = -1,
+    track_changes: bool = True,
 ) -> Dict[str, Any]:
     """合并指定表格里的单元格区域（对已存在的表格操作）。
 
@@ -841,6 +864,9 @@ def word_merge_cells(
                        [{"row": 0, "col": 0, "rowspan": 1, "colspan": 3}]。
                        行列索引从 0 开始、按完整网格计数。
         :param table_index: 表格索引，默认 -1 表示文档中最后一个表格。
+        :param track_changes: 与其他原位改写工具保持一致的签名；合并属于结构变更，
+                              OOXML 的结构类修订在 OnlyOffice / WPS 上表现不一致，
+                              因此始终直接合并、不写修订记录。
 
     AI 调用说明：
     适用：对已有表格执行单元格合并。
@@ -850,7 +876,7 @@ def word_merge_cells(
     """
     with _op(doc_id) as session:
         table = _table(session, table_index)
-        WordFormatter.merge_cells(table, merges)
+        WordFormatter.merge_cells(table, merges, track_changes=track_changes)
         return _result(session, table_index=table_index, merged=len(merges or []))
 
 
@@ -861,11 +887,14 @@ def word_format_cell(
     text: str,
     table_index: int = -1,
     font_name: str = DEFAULT_CN_FONT,
+    en_font: Optional[str] = None,
     font_size: FontSize = 12,
     bold: bool = False,
     alignment: str = "居中",
     line_spacing: float = 1.25,
     highlight: bool = False,
+    track_changes: bool = True,
+    revision_author: Optional[str] = None,
 ) -> Dict[str, Any]:
     """改写指定表格单元格的内容与格式。
 
@@ -875,10 +904,14 @@ def word_format_cell(
         :param text: 新的单元格文本（会清空原有内容）。
         :param table_index: 表格索引，默认 -1 表示文档中最后一个表格。
         :param font_name: 中文字体名。
+        :param en_font: 西文字体名；省略时与 ``font_name`` 保持一致。若确实需要
+                        中文宋体、西文 Times New Roman，可显式传入后者。
         :param font_size: 字号。
         :param bold: 是否加粗。
         :param alignment: 对齐方式。
         :param line_spacing: 行距倍数。
+        :param track_changes: 是否以修订（审阅）方式记录改动，默认是。
+        :param revision_author: 修订记录里显示的作者，默认 ``AI 助手``。
 
     AI 调用说明：
     适用：改写指定单元格的文字和字体格式。
@@ -894,9 +927,10 @@ def word_format_cell(
                 f"单元格 ({row}, {col}) 超出范围（该表共 {row_count} 行 × {col_count} 列）。"
             )
         WordFormatter.set_cell(
-            table.cell(row, col), text, font_name=font_name, font_size=font_size,
-            bold=bold, alignment=alignment, line_spacing=line_spacing,
-            highlight=highlight,
+            table.cell(row, col), text, font_name=font_name,
+            en_font=en_font or font_name, font_size=font_size, bold=bold,
+            alignment=alignment, line_spacing=line_spacing, highlight=highlight,
+            track_changes=track_changes, revision_author=revision_author,
         )
         return _result(session, table_index=table_index, row=row, col=col)
 
@@ -1013,6 +1047,8 @@ def word_replace_text(
     col: Optional[int] = None,
     count: int = 1,
     highlight: bool = False,
+    track_changes: bool = True,
+    revision_author: Optional[str] = None,
 ) -> Dict[str, Any]:
     """把已有内容里的 ``old`` 原位替换为 ``new``，**格式沿用原处**。
 
@@ -1037,6 +1073,10 @@ def word_replace_text(
         :param col: 单元格列号，从 0 开始。
         :param count: 最多替换几处，默认 1；传 0 表示全部替换。
         :param highlight: 是否把填进去的内容标黄，便于人工复核，默认否。
+        :param track_changes: 是否以修订（审阅）方式记录改动，默认是。开着时原文
+                              记成删除修订、新值记成插入修订，Office / WPS /
+                              OnlyOffice 的审阅面板里都能接受或拒绝。
+        :param revision_author: 修订记录里显示的作者，默认 ``AI 助手``。
 
     AI 调用说明：
     适用：替换可见文字占位，或向段尾追加普通文本。
@@ -1064,7 +1104,10 @@ def word_replace_text(
             )
 
         if old:
-            target = next((item for item in paragraphs if old in item.text), None)
+            target = next(
+                (item for item in paragraphs if old in WordFormatter.visible_text(item)),
+                None,
+            )
         else:
             target = paragraphs[0] if paragraphs else None
         if target is None:
@@ -1074,8 +1117,21 @@ def word_replace_text(
             )
         replaced = WordFormatter.replace_text(
             target, old, new, count=count, highlight=highlight,
+            track_changes=track_changes, revision_author=revision_author,
         )
-        return _result(session, replaced=replaced, old=old, new=new, **location)
+        return _result(
+            session,
+            replaced=replaced,
+            old=old,
+            new=new,
+            track_changes=track_changes,
+            paragraph_text=(
+                WordFormatter.visible_text(paragraphs[0])
+                if paragraph_index is not None and paragraphs
+                else None
+            ),
+            **location,
+        )
 
 
 def word_fill_underline(
@@ -1087,7 +1143,9 @@ def word_fill_underline(
     row: Optional[int] = None,
     col: Optional[int] = None,
     cell_paragraph_index: int = 0,
-    trailing_spaces: Optional[int] = None,
+    trailing_spaces: Optional[int] = 1,
+    track_changes: bool = True,
+    revision_author: Optional[str] = None,
 ) -> Dict[str, Any]:
     """填写段落里由带下划线空格组成的固定空位。
 
@@ -1102,6 +1160,8 @@ def word_fill_underline(
     :param table_index/row/col: 表格单元格坐标。
     :param cell_paragraph_index: 单元格内段落下标，默认 0。
     :param trailing_spaces: 尾随下划线空格数；None 表示按原空位宽度补齐。
+    :param track_changes: 是否以修订（审阅）方式记录改动，默认是。
+    :param revision_author: 修订记录里显示的作者，默认 ``AI 助手``。
 
     AI 调用说明：
     适用：填写只由空格组成且 underline=true 的下划线空位。
@@ -1141,10 +1201,12 @@ def word_fill_underline(
             run_index,
             new,
             trailing_spaces=trailing_spaces,
+            track_changes=track_changes,
+            revision_author=revision_author,
         )
         return _result(
             session,
-            paragraph_text=paragraph.text,
+            paragraph_text=WordFormatter.visible_text(paragraph),
             new=str(new or "").strip(),
             **location,
             **result,
@@ -1157,11 +1219,18 @@ def word_replace_underline_text(
     run_index: int,
     old: str,
     new: str,
+    leading_spaces: Optional[int] = None,
+    trailing_spaces: Optional[int] = None,
+    track_changes: bool = True,
+    revision_author: Optional[str] = None,
 ) -> Dict[str, Any]:
     """替换带下划线 run 里的可见占位文字。
 
     用于 `（招标项目名称、招标编号）` 这类本身有文字、同时带下划线格式的占位。
     与 word_fill_underline 的区别是：本工具要求 run 中有可见的 old 文字。
+
+    :param track_changes: 是否以修订（审阅）方式记录改动，默认是。
+    :param revision_author: 修订记录里显示的作者，默认 ``AI 助手``。
 
     AI 调用说明：
     适用：下划线 run 内包含可见占位词，需要保留下划线原位替换。
@@ -1172,12 +1241,19 @@ def word_replace_underline_text(
     with _op(doc_id) as session:
         paragraph = _paragraph(session, paragraph_index)
         result = WordFormatter.replace_underline_text(
-            paragraph, run_index, old, new
+            paragraph,
+            run_index,
+            old,
+            new,
+            leading_spaces=leading_spaces,
+            trailing_spaces=trailing_spaces,
+            track_changes=track_changes,
+            revision_author=revision_author,
         )
         return _result(
             session,
             paragraph_index=paragraph_index,
-            paragraph_text=paragraph.text,
+            paragraph_text=WordFormatter.visible_text(paragraph),
             **result,
         )
 
@@ -1193,6 +1269,8 @@ def word_insert_cell_image(
     height_cm: Optional[float] = None,
     alignment: str = "居中",
     keep_text: bool = False,
+    track_changes: bool = True,
+    revision_author: Optional[str] = None,
 ) -> Dict[str, Any]:
     """把图片放进指定表格单元格（身份证、营业执照、印章这类「贴格子」场景）。
 
@@ -1210,6 +1288,8 @@ def word_insert_cell_image(
         :param height_cm: 图片高度，单位 cm，可选。
         :param alignment: 单元格内对齐方式，默认居中。
         :param keep_text: 是否保留格子里已有的文字，默认否（清空后再贴图）。
+        :param track_changes: 是否以修订（审阅）方式记录改动，默认是。
+        :param revision_author: 修订记录里显示的作者，默认 ``AI 助手``。
 
     AI 调用说明：
     适用：把证件照、营业执照、印章等图片贴进已有表格单元格。
@@ -1231,6 +1311,7 @@ def word_insert_cell_image(
         WordFormatter.insert_cell_image(
             table.cell(row, col), str(path), width=width_cm, height=height_cm,
             alignment=alignment, keep_text=keep_text,
+            track_changes=track_changes, revision_author=revision_author,
         )
         return _result(
             session, table_index=table_index, row=row, col=col,
@@ -2262,7 +2343,8 @@ def _resolve_run_ref(session: Session, ref: Dict[str, Any]):
     if "paragraph" not in ref:
         raise ReportSessionError("run 引用缺少 paragraph 字段。")
     paragraph = _resolve_paragraph_ref(session, ref["paragraph"])
-    runs = paragraph.runs
+    # 用可见 run：审阅模式下插入的内容包在 w:ins 里，paragraph.runs 读不到
+    runs = WordFormatter.visible_runs(paragraph)
     if not runs:
         raise ReportSessionError("目标段落中没有 run。")
     run_index = int(ref.get("run_index", 0))
@@ -2297,6 +2379,327 @@ def _describe_result(value: Any) -> Any:
     if value is None or isinstance(value, (str, int, float, bool)):
         return value
     return type(value).__name__
+
+
+_RUN_TOGGLE_NAMES = (
+    "strike",
+    "double_strike",
+    "outline",
+    "shadow",
+    "emboss",
+    "imprint",
+    "hidden",
+    "small_caps",
+    "snap_to_grid",
+    "spec_vanish",
+    "web_hidden",
+    "rtl",
+    "no_proof",
+    "math",
+    "cs_bold",
+    "cs_italic",
+    "complex_script",
+)
+
+_SECTION_START_TYPES = {
+    "continuous": WD_SECTION_START.CONTINUOUS,
+    "nextcolumn": WD_SECTION_START.NEW_COLUMN,
+    "nextpage": WD_SECTION_START.NEW_PAGE,
+    "evenpage": WD_SECTION_START.EVEN_PAGE,
+    "oddpage": WD_SECTION_START.ODD_PAGE,
+}
+
+_TABLE_DIRECTIONS = {
+    "ltr": WD_TABLE_DIRECTION.LTR,
+    "rtl": WD_TABLE_DIRECTION.RTL,
+}
+
+
+def _normalize_key(value: str) -> str:
+    return "".join(str(value).split()).replace("_", "").replace("-", "").lower()
+
+
+def _rgb_color(value: Any) -> RGBColor:
+    if isinstance(value, (tuple, list)) and len(value) == 3:
+        return RGBColor(*(int(component) for component in value))
+    text = str(value).strip().lstrip("#")
+    if len(text) != 6:
+        raise ReportSessionError(
+            f"color 需要 6 位十六进制（如 \"FF0000\"），收到 {value!r}。"
+        )
+    try:
+        return RGBColor(int(text[0:2], 16), int(text[2:4], 16), int(text[4:6], 16))
+    except ValueError as exc:
+        raise ReportSessionError(f"color 不是合法颜色: {value!r}。") from exc
+
+
+def _locate_paragraph(
+    session: Session,
+    paragraph_index: Optional[int],
+    table_index: Optional[int],
+    row: Optional[int],
+    col: Optional[int],
+    cell_paragraph_index: int,
+):
+    """把正文下标或表格坐标解析成段落对象，并返回回显用的位置。"""
+    if paragraph_index is not None:
+        return _paragraph(session, paragraph_index), {"paragraph_index": paragraph_index}
+    if table_index is not None and row is not None and col is not None:
+        table = _table(session, table_index)
+        row_count, col_count = len(table.rows), len(table.columns)
+        if row < 0 or row >= row_count or col < 0 or col >= col_count:
+            raise ReportSessionError(
+                f"单元格 ({row}, {col}) 超出范围（该表共 {row_count} 行 × {col_count} 列）。"
+            )
+        paragraphs = table.cell(row, col).paragraphs
+        if cell_paragraph_index < 0 or cell_paragraph_index >= len(paragraphs):
+            raise ReportSessionError(
+                f"cell_paragraph_index {cell_paragraph_index} 超出单元格段落范围"
+            )
+        return (
+            paragraphs[cell_paragraph_index],
+            {"table_index": table_index, "row": row, "col": col},
+        )
+    raise ReportSessionError(
+        "必须提供 paragraph_index，或同时提供 table_index/row/col。"
+    )
+
+
+def _run_format_payload(run) -> Dict[str, Any]:
+    """回显 run 当前的字符格式，方便 AI 改完直接核对。"""
+    font = run.font
+    size = font.size
+    color = font.color.rgb
+    payload: Dict[str, Any] = {
+        "text": run.text,
+        "font_name": font.name,
+        "font_size_pt": round(size.pt, 2) if size is not None else None,
+        "bold": font.bold,
+        "italic": font.italic,
+        "underline": font.underline,
+        "all_caps": font.all_caps,
+        "color": str(color) if color is not None else None,
+        "highlight_color": font.highlight_color,
+        "subscript": font.subscript,
+        "superscript": font.superscript,
+    }
+    for name in _RUN_TOGGLE_NAMES:
+        payload[name] = getattr(font, name)
+    return payload
+
+
+def word_format_run(
+    doc_id: str,
+    run_index: int,
+    paragraph_index: Optional[int] = None,
+    table_index: Optional[int] = None,
+    row: Optional[int] = None,
+    col: Optional[int] = None,
+    cell_paragraph_index: int = 0,
+    font_name: Optional[str] = None,
+    en_font: Optional[str] = None,
+    font_size: Optional[FontSize] = None,
+    bold: Optional[bool] = None,
+    italic: Optional[bool] = None,
+    underline: Optional[Union[bool, str]] = None,
+    all_caps: Optional[bool] = None,
+    color: Optional[str] = None,
+    highlight_color: Optional[str] = None,
+    strike: Optional[bool] = None,
+    double_strike: Optional[bool] = None,
+    outline: Optional[bool] = None,
+    shadow: Optional[bool] = None,
+    emboss: Optional[bool] = None,
+    imprint: Optional[bool] = None,
+    hidden: Optional[bool] = None,
+    small_caps: Optional[bool] = None,
+    snap_to_grid: Optional[bool] = None,
+    spec_vanish: Optional[bool] = None,
+    web_hidden: Optional[bool] = None,
+    rtl: Optional[bool] = None,
+    no_proof: Optional[bool] = None,
+    math: Optional[bool] = None,
+    cs_bold: Optional[bool] = None,
+    cs_italic: Optional[bool] = None,
+    complex_script: Optional[bool] = None,
+    subscript: Optional[bool] = None,
+    superscript: Optional[bool] = None,
+) -> Dict[str, Any]:
+    """设置某个已存在 run 的字符级格式（含删除线、小型大写、上下标等长尾开关）。
+
+        只改你显式传入的参数：传 None（默认）的字段保持原样，不会覆盖现有格式。
+
+        :param doc_id: 会话 id。
+        :param run_index: 段内可见 run 下标，先用 word_list_blocks 获取。
+        :param paragraph_index: 正文段落下标；与表格坐标二选一。
+        :param table_index/row/col: 表格单元格坐标。
+        :param cell_paragraph_index: 单元格内段落下标，默认 0。
+        :param font_name/en_font: 中文字体 / 西文字体；只传 font_name 时西文也用同名字体。
+        :param font_size: 字号，pt 数字或 "三号" 这类中文号数。
+        :param bold/italic/underline/all_caps: 常规字符开关。
+        :param color: 字体颜色，6 位十六进制，如 "FF0000"。
+        :param highlight_color: 高亮颜色名，如 "yellow"。
+        :param strike: 删除线。
+        :param double_strike: 双删除线。
+        :param outline: 空心。
+        :param shadow: 阴影。
+        :param emboss: 阳文。
+        :param imprint: 阴文。
+        :param hidden: 隐藏文字。
+        :param small_caps: 小型大写字母。
+        :param snap_to_grid: 对齐文档网格。
+        :param spec_vanish: 隐藏但保留占位。
+        :param web_hidden: 网页版隐藏。
+        :param rtl: 从右到左。
+        :param no_proof: 不做拼写检查。
+        :param math: 数学字符。
+        :param cs_bold/cs_italic: 复杂文种加粗 / 斜体。
+        :param complex_script: 复杂文种。
+        :param subscript/superscript: 下标 / 上标，二者互斥。
+
+    AI 调用说明：
+    适用：给已存在的 run 加删除线、小型大写、上下标、隐藏文字等字符效果，或补设字体字号颜色。
+    不要用于：新增正文段落（用 word_add_body / word_add_body_list），也不要用于整段样式（用 word_set_paragraph_style）。
+    调用前后：先用 word_list_blocks 拿到 paragraph_index 和 run_index；返回值里的 format 就是改完后的实际格式，可直接核对。
+    失败处理：run_index 越界、段内没有 run、或上下标同时为真会失败；重新读取 blocks 修正后重试。
+    """
+    with _op(doc_id) as session:
+        if subscript and superscript:
+            raise ReportSessionError("subscript 与 superscript 不能同时为真。")
+        paragraph, location = _locate_paragraph(
+            session, paragraph_index, table_index, row, col, cell_paragraph_index,
+        )
+        runs = WordFormatter.visible_runs(paragraph)
+        if not runs:
+            raise ReportSessionError("目标段落中没有 run。")
+        if run_index < 0 or run_index >= len(runs):
+            raise ReportSessionError(
+                f"run_index {run_index} 超出范围（该段共 {len(runs)} 个可见 run）。"
+            )
+        run = runs[run_index]
+        font = run.font
+
+        if font_name is not None:
+            font.name = en_font or font_name
+            run.element.get_or_add_rPr().rFonts.set(qn("w:eastAsia"), font_name)
+        elif en_font is not None:
+            font.name = en_font
+        if font_size is not None:
+            font.size = Pt(_to_pt(font_size))
+        if color is not None:
+            font.color.rgb = _rgb_color(color)
+        if highlight_color is not None:
+            font.highlight_color = highlight_color
+
+        for name, value in (
+            ("bold", bold),
+            ("italic", italic),
+            ("underline", underline),
+            ("all_caps", all_caps),
+            ("strike", strike),
+            ("double_strike", double_strike),
+            ("outline", outline),
+            ("shadow", shadow),
+            ("emboss", emboss),
+            ("imprint", imprint),
+            ("hidden", hidden),
+            ("small_caps", small_caps),
+            ("snap_to_grid", snap_to_grid),
+            ("spec_vanish", spec_vanish),
+            ("web_hidden", web_hidden),
+            ("rtl", rtl),
+            ("no_proof", no_proof),
+            ("math", math),
+            ("cs_bold", cs_bold),
+            ("cs_italic", cs_italic),
+            ("complex_script", complex_script),
+        ):
+            if value is not None:
+                setattr(font, name, value)
+
+        if subscript is not None:
+            font.subscript = subscript
+        if superscript is not None:
+            font.superscript = superscript
+
+        return _result(
+            session,
+            **location,
+            run_index=run_index,
+            format=_run_format_payload(run),
+        )
+
+
+def word_set_table_direction(
+    doc_id: str,
+    direction: str,
+    table_index: int = -1,
+) -> Dict[str, Any]:
+    """设置表格的整体排列方向（从左到右 / 从右到左 / 回到样式继承）。
+
+        :param doc_id: 会话 id。
+        :param direction: "ltr" 从左到右、"rtl" 从右到左、"inherit" 清除直接格式。
+        :param table_index: 表格下标，默认 -1 表示最后一个表格。
+
+    AI 调用说明：
+    适用：阿拉伯语等从右到左书写的表格，或需要清掉误设的方向时传 inherit。
+    不要用于：调换某一行/列的单元格顺序（那属于内容改写，用 word_replace_text 或 word_format_cell）。
+    调用前后：不确定表格下标时先 word_describe_report 查看表格数量；返回值里的 table_direction 是设置后的结果。
+    失败处理：direction 取值非法或 table_index 越界会失败；按提示改值后重试。
+    """
+    with _op(doc_id) as session:
+        key = _normalize_key(direction)
+        if key in ("inherit", "none", ""):
+            resolved = None
+        elif key in _TABLE_DIRECTIONS:
+            resolved = _TABLE_DIRECTIONS[key]
+        else:
+            raise ReportSessionError(
+                f"direction 只支持 'ltr' / 'rtl' / 'inherit'，收到 {direction!r}。"
+            )
+        table = _table(session, table_index)
+        table.table_direction = resolved
+        current = table.table_direction
+        return _result(
+            session,
+            table_index=table_index,
+            direction="inherit" if current is None else current.name.lower(),
+            table_direction=None if current is None else current.name,
+        )
+
+
+def word_set_section_start_type(
+    doc_id: str,
+    start_type: str,
+    section_index: int = -1,
+) -> Dict[str, Any]:
+    """设置分节符类型（新页 / 奇数页 / 偶数页 / 连续 / 新栏开始）。
+
+        :param doc_id: 会话 id。
+        :param start_type: "nextPage" / "oddPage" / "evenPage" / "continuous" /
+                           "nextColumn"，中间带下划线或短横线也接受。
+        :param section_index: 分节下标，默认 -1 表示最后一节。
+
+    AI 调用说明：
+    适用：让某一节从奇数页或新页开始这类分节控制。
+    不要用于：段前分页（段落级用 page_break_before 参数），也不要用于插入分节符本身（用 word_insert_section）。
+    调用前后：先用 word_describe_report 确认分节数量；返回值里的 start_type 是设置后的结果。
+    失败处理：取值非法或 section_index 越界会失败；按提示改值后重试。
+    """
+    with _op(doc_id) as session:
+        key = _normalize_key(start_type)
+        if key not in _SECTION_START_TYPES:
+            raise ReportSessionError(
+                f"start_type 只支持 {sorted(_SECTION_START_TYPES)}，收到 {start_type!r}。"
+            )
+        section = _section(session, section_index)
+        section.start_type = _SECTION_START_TYPES[key]
+        current = section.start_type
+        return _result(
+            session,
+            section_index=section_index,
+            start_type=None if current is None else current.name,
+        )
 
 
 def word_describe_api() -> str:
@@ -2373,6 +2776,9 @@ TOOLS = (
     word_merge_cells,
     word_format_cell,
     word_set_table_borders,
+    word_set_table_direction,
+    # Layer 2 · 字符级格式
+    word_format_run,
     # Layer 2 · 模板填充
     word_list_blocks,
     word_describe_format_profile,
@@ -2392,6 +2798,7 @@ TOOLS = (
     # Layer 2 · 节与页码
     word_insert_section,
     word_set_section_page,
+    word_set_section_start_type,
     word_set_page_numbers,
     word_restart_page_numbering,
     word_set_page_number_start,

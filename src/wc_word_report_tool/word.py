@@ -1,6 +1,6 @@
 """wc_word_report_tool.word
 =========================
-基于 python-docx 的中文 Word 报告格式化工具。
+基于直接 OOXML 操作的中文 Word 报告格式化工具。
 
 设计目标
 --------
@@ -9,7 +9,7 @@
 3. **默认合理**：默认值贴近中国公文标准（仿宋_GB2312、三号 14pt、1.5 倍行距）。
 4. **严格校验**：未知参数抛 ValueError 而非静默降级，便于调试。
 
-版本：v0.8.3
+版本：v0.8.4
 作者：willcha
 """
 
@@ -17,22 +17,35 @@ from __future__ import annotations
 
 import datetime as _datetime
 import io
+import weakref
+from copy import deepcopy
 from pathlib import Path
 
-from docx.enum.section import WD_ORIENT, WD_SECTION_START
-from docx.enum.style import WD_STYLE_TYPE
-from docx.enum.table import WD_ROW_HEIGHT_RULE, WD_TABLE_ALIGNMENT
-from docx.enum.text import (
+from .ooxml import (
     WD_COLOR_INDEX,
+    WD_ORIENT,
     WD_PARAGRAPH_ALIGNMENT,
+    WD_ROW_HEIGHT_RULE,
+    WD_SECTION_START,
+    WD_STYLE_TYPE,
     WD_TAB_ALIGNMENT,
+    WD_TABLE_ALIGNMENT,
     WD_UNDERLINE,
+    Cm,
+    OxmlElement,
+    Pt,
+    RGBColor,
+    Run,
+    Table,
+    parse_xml,
+    qn,
 )
-from docx.image.image import Image as _DocxImage
-from docx.oxml import OxmlElement, parse_xml
-from docx.oxml.ns import qn
-from docx.shared import Cm, Pt, RGBColor
-from docx.table import Table
+from .ooxml import (
+    Document as OoxmlDocument,
+)
+from .ooxml import (
+    Image as _DocxImage,
+)
 
 # ====================================================================
 # 字号常量（单位：pt）
@@ -59,6 +72,13 @@ DEFAULT_EN_FONT = "Times New Roman"
 DEFAULT_BODY_SIZE = 14          # 四号
 DEFAULT_HEADER_FOOTER_FONT = "楷体"
 DEFAULT_HEADER_FOOTER_SIZE = 9  # 小五号
+
+# 审阅模式（tracked changes）里写入修订记录的默认作者名。
+# 修订记录使用 OOXML 标准的 w:ins / w:del，Office、WPS、OnlyOffice 都能识别。
+REVISION_AUTHOR = "AI 助手"
+
+# 每份文档（以 document 根元素为键）已用到的最大修订 id，避免 w:id 重复。
+_REVISION_IDS: "weakref.WeakKeyDictionary" = weakref.WeakKeyDictionary()
 
 # 页码/编号格式 -> OOXML `w:pgNumType/@w:fmt` 取值。
 # 中文报告的封面与目录常用罗马数字（Ⅰ/Ⅱ），正文才用阿拉伯数字。
@@ -94,7 +114,7 @@ ORIENTATION_MAP = {
     "L": (WD_ORIENT.LANDSCAPE, "landscape"),
 }
 
-# 页眉页脚变体 -> python-docx Section 上的属性名
+# 页眉页脚变体 -> 内部 Section 上的属性名
 _HEADER_FOOTER_VARIANTS = {
     "primary": ("header", "footer"),
     "default": ("header", "footer"),
@@ -109,12 +129,12 @@ _HEADER_FOOTER_VARIANTS = {
 def _to_pt(size) -> float:
     """将字号参数统一转为 pt。
     - int/float：视为 pt 数值
-    - python-docx 的 ``Length``：取它的 ``.pt``（``Length`` 是 int 子类，
+    - 内部 ``Length``：取它的 ``.pt``（``Length`` 是 int 子类，
       内部存的是 EMU，直接当数值用会放大 12700 倍）
     - str："三号"/"小五"/"16" 等中文号数或字符串数字
     """
     if isinstance(size, (int, float)):
-        # docx.shared.Pt(22) 的真身是整数 279400（EMU），只有 .pt 才是 22.0。
+        # Pt(22) 的真身是整数 279400（EMU），只有 .pt 才是 22.0。
         # run.font.size 读出来就是这个类型，漏判会让所有字号都被当成巨大值。
         pt_value = getattr(size, "pt", None)
         if isinstance(pt_value, (int, float)):
@@ -148,7 +168,7 @@ def pt_to_font_size(size, *, ties: str = "larger") -> str:
     正好落在两档正中间时（13pt、20pt、31pt 这种）由 ``ties`` 决定取向，
     默认取更大的号。
 
-    :param size: 字号，pt 数字 / 数字字符串 / 中文字号 / python-docx 的 ``Length``。
+    :param size: 字号，pt 数字 / 数字字符串 / 中文字号 / 内部 ``Length``。
     :param ties: 正中间的取向，``"larger"``（默认，取更大的号）或
                  ``"smaller"``（取更小的号）。
     """
@@ -173,7 +193,7 @@ def describe_font_size(size, *, ties: str = "larger") -> dict:
     ``exact=False`` 表示该 pt 并不等于任何中文字号，而是被吸附过去的，
     ``delta_pt`` 是吸附前后的差值。
 
-    :param size: 字号，pt 数字 / 数字字符串 / 中文字号 / python-docx 的 ``Length``。
+    :param size: 字号，pt 数字 / 数字字符串 / 中文字号 / 内部 ``Length``。
     :param ties: 正中间的取向，同 :func:`pt_to_font_size`。
     """
     pt = _to_pt(size)
@@ -185,6 +205,12 @@ def describe_font_size(size, *, ties: str = "larger") -> dict:
         "exact": delta == 0,
         "delta_pt": delta,
     }
+
+
+def _drawing_with_anchor(anchor):
+    drawing = OxmlElement("w:drawing")
+    drawing.append(anchor)
+    return drawing
 
 
 class WordFormatter:
@@ -235,9 +261,15 @@ class WordFormatter:
         3: WD_PARAGRAPH_ALIGNMENT.RIGHT,
     }
 
-    def __init__(self, doc):
-        """创建绑定到指定 Word 文档的格式化器。"""
-        self.doc = doc
+    def __init__(self, doc=None):
+        """创建绑定到 Word 文档的格式化器。
+
+        ``doc`` 可以是内部 OOXML Document、DOCX 路径、bytes，或省略以创建空白文档。
+        """
+        if doc is None or isinstance(doc, (str, Path, bytes, bytearray)):
+            self.doc = OoxmlDocument(doc)
+        else:
+            self.doc = doc
 
     _PAGE_JUSTIFICATION_MAP = {
         "左对齐": "left",
@@ -272,7 +304,7 @@ class WordFormatter:
                      highlight=None, underline: bool | str = False) -> None:
         """设置 run 的字体（中英文分别设置）、字号、加粗、颜色、高亮、下划线。
 
-        :param run: python-docx 的 Run 对象
+        :param run: 内部 Run 对象
         :param cn_font: 中文字体名（写入 w:eastAsia）
         :param en_font: 西文字体名（写入 w:ascii / w:hAnsi）
         :param size: 字号，支持中文字号字符串，如 ``"三号"``、``"四号"``、``"小五"``。
@@ -316,7 +348,7 @@ class WordFormatter:
             从 PDF 还原版式时用它：PDF 里只有「相邻两行基线差多少 pt」这一个事实，
             换算成倍数要依赖字体自身的行高（随字体而变），直接写 pt 才是精确的。
         :param line_spacing_rule: 行距规则，``"exact"``（固定值）或 ``"atLeast"``
-            （最小值）；省略时按 python-docx 默认写成固定值。
+            （最小值）；省略时按默认规则写成固定值。
         :param space_before: 段前空白，单位 pt。
         :param space_after: 段后空白，单位 pt。
         :param first_line_indent_pt: 首行缩进兜底值，单位 pt；None 表示不设置。
@@ -330,7 +362,7 @@ class WordFormatter:
         """
         if alignment is not None:
             paragraph.alignment = WordFormatter.resolve_alignment(alignment, strict=strict)
-        # 赋值 Pt 对象时 python-docx 会写 lineRule=exact（固定值）；赋数字则是倍数
+        # 赋值 Pt 对象时写 lineRule=exact（固定值）；赋数字则是倍数
         paragraph.paragraph_format.line_spacing = (
             Pt(line_spacing_pt) if line_spacing_pt else line_spacing)
         if line_spacing_pt and line_spacing_rule:
@@ -1090,7 +1122,9 @@ class WordFormatter:
         return probe.px_width / dpi * 2.54
 
     def insert_img(self, img_path, width=None, *, height=None, alignment="居左",
-                   floating: bool = False, y_offset_pt: float = 0):
+                   floating: bool = False, y_offset_pt: float = 0,
+                   paragraph_index: int | None = None,
+                   wrap_type: str | None = None):
         """插入图片。
 
         ``width`` 与 ``height`` 都不传时，按图片自身的 DPI 使用原始尺寸，
@@ -1103,13 +1137,38 @@ class WordFormatter:
         :param floating: 是否让图片浮于文字上方。印章需要压在落款文字上时用它，
                          PDF 里裁出的图表、公式也一样。
         :param y_offset_pt: 浮动图片的垂直偏移，单位 pt，正数上移、负数下移。
+        :param paragraph_index: 可选正文段落下标，支持负数。给定时图片作为新段落
+                                插在该段之后；省略时追加到文档末尾。
+        :param wrap_type: 图片环绕方式，可选“嵌入型 / 四周型环绕 / 紧密型环绕 /
+                          穿越型环绕 / 上下型环绕 / 衬于文字下方 / 衬于文字上方”。
+                          省略时沿用 floating 的旧行为。
         """
         if width is not None and width <= 0:
             raise ValueError(f"图片宽度必须大于 0，收到 {width!r}")
         if height is not None and height <= 0:
             raise ValueError(f"图片高度必须大于 0，收到 {height!r}")
+        effective_wrap = self.resolve_image_wrap_type(wrap_type, floating=floating)
+
+        anchor = None
+        if paragraph_index is not None:
+            paragraphs = self.doc.paragraphs
+            if not paragraphs:
+                raise ValueError("文档中还没有正文段落，无法按 paragraph_index 插入图片")
+            resolved = (
+                paragraph_index + len(paragraphs)
+                if paragraph_index < 0
+                else paragraph_index
+            )
+            if resolved < 0 or resolved >= len(paragraphs):
+                raise ValueError(
+                    f"paragraph_index {paragraph_index} 超出范围"
+                    f"（共 {len(paragraphs)} 段，0~{len(paragraphs) - 1}）"
+                )
+            anchor = paragraphs[resolved]
 
         par = self.doc.add_paragraph("")
+        if anchor is not None:
+            anchor._p.addnext(par._p)
         par.alignment = self.resolve_alignment(alignment)
         run = par.add_run()
         source, owned = self._image_stream(img_path)
@@ -1125,8 +1184,10 @@ class WordFormatter:
         finally:
             if owned:
                 source.close()
-        if floating:
-            self._make_run_floating(run, y_offset_pt=y_offset_pt)
+        if effective_wrap != "嵌入型":
+            self._make_run_anchor(
+                run, wrap_type=effective_wrap, y_offset_pt=y_offset_pt,
+            )
         return par
 
     # ================================================================
@@ -1163,10 +1224,10 @@ class WordFormatter:
         self.blank_lines(info_blank_lines)
 
         table = self.doc.add_table(rows=2, cols=3)
-        self.edit_cell(table, "委托单位：", 0, 1, bold=True)
-        self.edit_cell(table, entrusting_unit, 0, 2, bold=True)
-        self.edit_cell(table, "编制单位：", 1, 1, bold=True)
-        self.edit_cell(table, compiling_unit, 1, 2, bold=True)
+        self.edit_cell(table, "委托单位：", 0, 1, bold=True, track_changes=False)
+        self.edit_cell(table, entrusting_unit, 0, 2, bold=True, track_changes=False)
+        self.edit_cell(table, "编制单位：", 1, 1, bold=True, track_changes=False)
+        self.edit_cell(table, compiling_unit, 1, 2, bold=True, track_changes=False)
         for row in table.rows:
             row.cells[0].width = Cm(1.5)
             row.cells[1].width = Cm(4)
@@ -1222,9 +1283,9 @@ class WordFormatter:
 
         table = self.doc.add_table(rows=10 + len(participants), cols=4)
         table.cell(0, 0).merge(table.cell(0, 3))
-        self.edit_cell(table, f"委托单位：{entrusting_unit}", 0, 0, bold=True)
+        self.edit_cell(table, f"委托单位：{entrusting_unit}", 0, 0, bold=True, track_changes=False)
         table.cell(1, 0).merge(table.cell(1, 3))
-        self.edit_cell(table, f"报告编制单位：{compiling_unit}", 1, 0, bold=True)
+        self.edit_cell(table, f"报告编制单位：{compiling_unit}", 1, 0, bold=True, track_changes=False)
 
         roles = (
             ("公司签发", 3), ("部门核准", 4), ("部门审核", 5),
@@ -1235,13 +1296,13 @@ class WordFormatter:
             department_and_position = [data.get("部门", ""), data.get("职务", "")]
             if role == "公司签发":
                 department_and_position[0] = ""
-            self.edit_cell(table, f"{role}：", row_index, 0)
-            self.edit_cell(table, data.get("姓名", ""), row_index, 1)
-            self.edit_cell(table, department_and_position, row_index, 2)
-            self.edit_cell(table, data.get("职称", ""), row_index, 3)
+            self.edit_cell(table, f"{role}：", row_index, 0, track_changes=False)
+            self.edit_cell(table, data.get("姓名", ""), row_index, 1, track_changes=False)
+            self.edit_cell(table, department_and_position, row_index, 2, track_changes=False)
+            self.edit_cell(table, data.get("职称", ""), row_index, 3, track_changes=False)
 
-        self.edit_cell(table, "签字：", 8, 0)
-        self.edit_cell(table, "盖章", 8, 2)
+        self.edit_cell(table, "签字：", 8, 0, track_changes=False)
+        self.edit_cell(table, "盖章", 8, 2, track_changes=False)
         table.rows[8].height = Cm(1.5)
         table.rows[8].height_rule = WD_ROW_HEIGHT_RULE.AT_LEAST
 
@@ -1249,13 +1310,14 @@ class WordFormatter:
         project_manager = personnel.get("项目负责人", {})
         self.edit_cell(
             table, f"联系电话：{project_manager.get('联系电话', '')}", 9, 2,
+            track_changes=False,
         )
 
         for index, data in enumerate(participants, start=10):
             if index == 10:
-                self.edit_cell(table, "项目参与者：", index, 0)
-            self.edit_cell(table, data.get("姓名", ""), index, 1)
-            self.edit_cell(table, data.get("职称", ""), index, 3)
+                self.edit_cell(table, "项目参与者：", index, 0, track_changes=False)
+            self.edit_cell(table, data.get("姓名", ""), index, 1, track_changes=False)
+            self.edit_cell(table, data.get("职称", ""), index, 3, track_changes=False)
 
         table.alignment = WD_TABLE_ALIGNMENT.CENTER
         for row in table.rows:
@@ -1271,7 +1333,7 @@ class WordFormatter:
     def set_table_borders(table, *, color: str = "000000", size: int = 4):
         """为表格添加四边及内部横竖边框。
 
-        :param table: docx.table.Table 对象。
+        :param table: 内部 Table 对象。
         :param color: 边框颜色，6 位十六进制 RGB 字符串，例如 ``"000000"``。
         :param size: 边框粗细，单位为 1/8 pt，例如 4 = 0.5pt、8 = 1pt。
         """
@@ -1289,21 +1351,40 @@ class WordFormatter:
         return table
 
     @staticmethod
-    def set_cell(cell, text: str, *, font_name: str = DEFAULT_CN_FONT, font_size=12,
+    def set_cell(cell, text: str, *, font_name: str = DEFAULT_CN_FONT,
+                 en_font: str | None = None, font_size=12,
                  bold: bool = False, alignment="居中", line_spacing=1.25,
-                 highlight: bool = False):
+                 highlight: bool = False,
+                 track_changes: bool = True,
+                 revision_author: str | None = None):
         """设置表格单元格内容与格式（增强版，支持加粗、对齐与高亮）。
 
-        :param cell: docx.table._Cell 对象。
+        ``track_changes`` 默认为真：单元格原有文字记成修订删除、新内容记成修订
+        插入（带加粗/字体等新格式），在 Office / WPS / OnlyOffice 的审阅面板里
+        可接受或拒绝。传 ``False`` 则直接覆盖原内容。
+
+        :param cell: 内部 Cell 对象。
         :param text: 单元格文本。
-        :param font_name: 字体名称。
+        :param font_name: 中文字体名称。
+        :param en_font: 西文字体名称；不传时沿用默认 Times New Roman。若表格要求
+                        中英文完全一致，应传与 ``font_name`` 相同的值。
         :param font_size: 字号，支持中文字号字符串。
         :param bold: 是否加粗，默认否。
         :param alignment: 对齐方式，默认居中，支持中文、英文、单字母、数字和对齐枚举。
         :param line_spacing: 行距倍数，默认 1.25。
         :param highlight: 是否黄色高亮，默认否。用于标出「由 AI 填写的临时数据」，
                           方便人工复核。
+        :param track_changes: 是否以修订（审阅）方式记录改动，默认是。
+        :param revision_author: 修订记录里显示的作者，默认 ``REVISION_AUTHOR``。
         """
+        if track_changes:
+            return WordFormatter._tracked_set_cell(
+                cell, text, font_name=font_name, en_font=en_font,
+                font_size=font_size, bold=bold, alignment=alignment,
+                line_spacing=line_spacing, highlight=highlight,
+                revision_author=revision_author,
+            )
+
         paragraph = WordFormatter._reset_cell_content(cell)
         paragraph.alignment = WordFormatter.resolve_alignment(alignment, strict=True)
         paragraph.paragraph_format.line_spacing = line_spacing
@@ -1311,10 +1392,63 @@ class WordFormatter:
         paragraph.paragraph_format.space_after = Pt(0)
         run = paragraph.add_run(text)
         WordFormatter.set_run_font(
-            run, cn_font=font_name, size=font_size, bold=bold,
+            run, cn_font=font_name, en_font=en_font or DEFAULT_EN_FONT,
+            size=font_size, bold=bold,
             highlight=WD_COLOR_INDEX.YELLOW if highlight else None,
         )
         return cell
+
+    @staticmethod
+    def _tracked_set_cell(cell, text: str, *, font_name: str, en_font: str | None,
+                          font_size, bold: bool, alignment, line_spacing: float,
+                          highlight: bool, revision_author: str | None = None):
+        """``set_cell`` 的审阅模式实现：旧内容记删除、新内容记插入。"""
+        author = WordFormatter._revision_author(revision_author)
+        date = WordFormatter._revision_stamp()
+
+        paragraphs = cell.paragraphs or [cell.add_paragraph()]
+        # 旧内容逐段标成修订删除，段落与格式框架留在原处
+        for paragraph in paragraphs:
+            WordFormatter._mark_paragraph_deleted(
+                paragraph, author=author, date=date,
+            )
+
+        paragraph = paragraphs[0]
+        paragraph.alignment = WordFormatter.resolve_alignment(alignment, strict=True)
+        paragraph.paragraph_format.line_spacing = line_spacing
+        paragraph.paragraph_format.space_before = Pt(0)
+        paragraph.paragraph_format.space_after = Pt(0)
+
+        run_element = WordFormatter._make_revision_run(
+            None, WordFormatter._text_elements(str(text)),
+        )
+        WordFormatter.set_run_font(
+            Run(run_element, paragraph),
+            cn_font=font_name, en_font=en_font or DEFAULT_EN_FONT,
+            size=font_size, bold=bold,
+            highlight=WD_COLOR_INDEX.YELLOW if highlight else None,
+        )
+        ins = OxmlElement("w:ins")
+        ins.set(qn("w:id"), str(WordFormatter._next_revision_id(cell._tc)))
+        ins.set(qn("w:author"), author)
+        ins.set(qn("w:date"), date)
+        ins.append(run_element)
+        paragraph._p.append(ins)
+        return cell
+
+    @staticmethod
+    def _mark_paragraph_deleted(paragraph, *, author: str, date: str) -> int:
+        """把段落里所有可见文字标成修订删除，返回涉及的文字长度。"""
+        marked = 0
+        for run in WordFormatter._revision_runs(paragraph):
+            length = len(WordFormatter._run_text(run))
+            if not length:
+                continue
+            WordFormatter._mark_run_range_deleted(
+                run, 0, length, author=author, date=date,
+            )
+            marked += length
+        return marked
 
     @staticmethod
     def _reset_cell_content(cell):
@@ -1332,7 +1466,9 @@ class WordFormatter:
     @staticmethod
     def edit_cell(table, context: str | list[str], row: int, col: int, *,
                   font_name: str = "宋体", font_size="小三",
-                  bold: bool = False):
+                  bold: bool = False,
+                  track_changes: bool = True,
+                  revision_author: str | None = None):
         """编辑表格指定单元格，支持一个单元格写入多行内容。
 
         :param table: 目标表格。
@@ -1342,8 +1478,50 @@ class WordFormatter:
         :param font_name: 中文字体名称。
         :param font_size: 字号，支持中文字号字符串。
         :param bold: 是否加粗，默认否。
+        :param track_changes: 是否以修订（审阅）方式记录改动，默认是。
+        :param revision_author: 修订记录里显示的作者，默认 ``REVISION_AUTHOR``。
         :return: 编辑后的单元格。
         """
+        cell = table.cell(row, col)
+        if not track_changes:
+            paragraph = WordFormatter._reset_cell_content(cell)
+            texts = context if isinstance(context, list) else [context]
+
+            for index, text in enumerate(texts):
+                run = paragraph.add_run(str(text))
+                WordFormatter.set_run_font(
+                    run, cn_font=font_name, en_font="Times New Roman",
+                    size=font_size, bold=bold,
+                )
+                if index < len(texts) - 1:
+                    run.add_break()
+            return cell
+
+        author = WordFormatter._revision_author(revision_author)
+        date = WordFormatter._revision_stamp()
+        texts = context if isinstance(context, list) else [context]
+        paragraphs = cell.paragraphs or [cell.add_paragraph()]
+        for paragraph in paragraphs:
+            WordFormatter._mark_paragraph_deleted(paragraph, author=author, date=date)
+
+        paragraph = paragraphs[0]
+        ins = OxmlElement("w:ins")
+        ins.set(qn("w:id"), str(WordFormatter._next_revision_id(cell._tc)))
+        ins.set(qn("w:author"), author)
+        ins.set(qn("w:date"), date)
+        run_element = OxmlElement("w:r")
+        for index, text in enumerate(texts):
+            run = Run(run_element, paragraph)
+            if index:
+                run.add_break()
+            run.add_text(str(text))
+            WordFormatter.set_run_font(
+                run, cn_font=font_name, en_font="Times New Roman",
+                size=font_size, bold=bold,
+            )
+        ins.append(run_element)
+        paragraph._p.append(ins)
+        return cell
         cell = table.cell(row, col)
         paragraph = WordFormatter._reset_cell_content(cell)
         texts = context if isinstance(context, list) else [context]
@@ -1362,7 +1540,7 @@ class WordFormatter:
     def set_table_columns(table, col_widths, *, fixed_layout: bool = True):
         """设置表格的列宽，并让 Word **真正按这个宽度渲染**。
 
-        只写 ``w:tcW`` 是不够的：python-docx 建表时写的是 ``w:tblW type="auto"``
+        只写 ``w:tcW`` 是不够的：新建表格时写的是 ``w:tblW type="auto"``
         且不设 ``w:tblLayout``，Word 会按自动布局重新分配列宽，把手工算好的列宽冲掉。
         因此这里一次写全三处，缺一不可：
 
@@ -1370,7 +1548,7 @@ class WordFormatter:
         * 每个单元格的 ``w:tcW`` —— 实际列宽（合并单元格按其跨列数写合计值）；
         * ``w:tblW`` + ``w:tblLayout type="fixed"`` —— 声明固定布局，禁止自动重排。
 
-        :param table: docx.table.Table 对象。
+        :param table: 内部 Table 对象。
         :param col_widths: 每列宽度列表，单位 cm，长度等于表格列数。
         :param fixed_layout: 是否锁定为固定布局，默认是。
         """
@@ -1400,7 +1578,7 @@ class WordFormatter:
 
         # 逐单元格写 tcW：按真实 tc 元素遍历（不能用 row.cells——合并后它会重复返回
         # 同一个锚点单元格，跨列数会被重复计算），合并单元格写它跨越列的合计宽度。
-        from docx.table import _Cell
+        from .ooxml import Cell as _Cell
         for tr in tbl.tr_lst:
             grid_col = 0
             for tc in tr.tc_lst:
@@ -1425,7 +1603,7 @@ class WordFormatter:
     def set_table_width(table, width_cm: float):
         """设置表格总宽度（``w:tblW``）。
 
-        :param table: docx.table.Table 对象。
+        :param table: 内部 Table 对象。
         :param width_cm: 表格总宽度，单位 cm。
         """
         if width_cm <= 0:
@@ -1492,16 +1670,21 @@ class WordFormatter:
         return regions
 
     @staticmethod
-    def merge_cells(table, merges):
+    def merge_cells(table, merges, *, track_changes: bool = True):
         """合并表格中指定的单元格区域（对已存在的表格按索引合并）。
 
         与 :meth:`add_table` 的 ``merges`` 语义一致：**只保留区域左上角单元格的内容**。
-        python-docx 的 ``merge()`` 会把被并单元格的文本拼接进来，这里在合并后把
+        表格合并会把被并单元格的文本拼接进来，这里在合并后把
         多出来的段落删掉，避免出现「A\\nB\\nC」这种意外结果。
 
-        :param table: docx.table.Table 对象。
+        ``track_changes`` 只为与其他原位改写方法保持一致的签名：合并属于**结构**
+        变更，OOXML 的 ``w:cellMerge`` 修订在 OnlyOffice / WPS 里表现不一致，
+        记录出来反而可能把表格显示坏，因此这里始终直接合并、不写修订记录。
+
+        :param table: 内部 Table 对象。
         :param merges: 合并描述列表，如 ``[{"row": 0, "col": 0, "rowspan": 2, "colspan": 3}]``
                        或 ``[(0, 0, 2, 3)]``。
+        :param track_changes: 是否以修订方式记录改动；结构类改动不支持，忽略该参数。
         """
         row_count, col_count = len(table.rows), len(table.columns)
         regions = WordFormatter._normalize_table_merges(merges, row_count, col_count)
@@ -1538,7 +1721,7 @@ class WordFormatter:
         """校验表格参数自洽，把「列数对不上」变成可读的错误。
 
         这里刻意不做静默修正：``headers`` / ``rows`` / ``col_widths`` 的长度必须相互自洽，
-        否则表格会整体错列。而越界时 python-docx 只会抛
+        否则表格会整体错列。而越界时底层实现只会抛
         ``IndexError: tuple index out of range``——对调用方毫无指向性，
         实测 OCR 产出「表头 1 列、数据行 4 列、列宽 4 个」时排查了很久。
         """
@@ -1592,7 +1775,7 @@ class WordFormatter:
                                 未覆盖的位置回落到 ``font_name``。
         :param cell_highlights: 逐单元格「是否黄色高亮」的二维布尔列表（含表头那一行），
                                 可选。用来标出由 AI 填写的临时数据，便于人工复核。
-        :return: docx.table.Table 对象
+        :return: 内部 Table 对象
         """
         row_count = 1 + len(rows)
         col_count = len(headers)
@@ -1605,7 +1788,7 @@ class WordFormatter:
 
         regions = self._normalize_table_merges(merges, row_count, col_count)
 
-        # 先合并再填内容：反过来会被 python-docx 把被并单元格的文本一并拼接进合并格
+        # 先合并再填内容：反过来会把被并单元格的文本一并拼接进合并格
         for r1, c1, r2, c2 in regions:
             table.cell(r1, c1).merge(table.cell(r2, c2))
 
@@ -1630,6 +1813,7 @@ class WordFormatter:
                 font_name=self._pick_from_grid(cell_font_names, row, col, font_name),
                 font_size=font_size, bold=bold, alignment=alignment,
                 highlight=bool(self._pick_from_grid(cell_highlights, row, col, False)),
+                track_changes=False,
             )
             if (row, col) in {(r1, c1) for r1, c1, _, _ in regions}:
                 self._strip_extra_paragraphs(cell)
@@ -1721,7 +1905,7 @@ class WordFormatter:
                             bold: bool = False):
         """把 ``\\t`` 分隔的文本写入段落，制表符落成真正的 ``<w:tab/>``。
 
-        python-docx 的 ``add_run("a\\tb")`` 会把制表符写进 ``<w:t>``，Word 不把它当
+        普通 ``add_run("a\\tb")`` 会把制表符写进 ``<w:t>``，Word 不把它当
         制表位处理，因此必须显式插入 ``w:tab`` 元素。
         """
         runs = []
@@ -2060,9 +2244,127 @@ class WordFormatter:
                 paragraph.paragraph_format.left_indent = Cm(0)
                 paragraph.paragraph_format.right_indent = Cm(remaining)
 
+    _IMAGE_WRAP_TYPES = (
+        "嵌入型",
+        "四周型环绕",
+        "紧密型环绕",
+        "穿越型环绕",
+        "上下型环绕",
+        "衬于文字下方",
+        "衬于文字上方",
+    )
+
+    @classmethod
+    def resolve_image_wrap_type(cls, wrap_type, *, floating: bool = False) -> str:
+        if wrap_type is None:
+            return "衬于文字上方" if floating else "嵌入型"
+        value = str(wrap_type).strip()
+        if value not in cls._IMAGE_WRAP_TYPES:
+            raise ValueError(
+                f"未知图片环绕方式 {wrap_type!r}，可选："
+                + " / ".join(cls._IMAGE_WRAP_TYPES)
+            )
+        return value
+
+    @staticmethod
+    def _make_run_anchor(run, *, wrap_type: str, y_offset_pt: float = 0):
+        """把内嵌图片替换为带标准 DrawingML 环绕设置的 ``wp:anchor``。"""
+        inline_nodes = run._r.xpath(".//wp:inline")
+        if not inline_nodes:
+            return
+        inline = inline_nodes[0]
+        drawing = inline.getparent()
+        extent = inline.find(qn("wp:extent"))
+        if drawing is None or extent is None:
+            return
+
+        width_emu = int(extent.get("cx", "0"))
+        height_emu = int(extent.get("cy", "0"))
+        if width_emu <= 0 or height_emu <= 0:
+            return
+
+        anchor = OxmlElement("wp:anchor")
+        anchor.set("distT", "0")
+        anchor.set("distB", "0")
+        anchor.set("distL", "114300")
+        anchor.set("distR", "114300")
+        anchor.set("simplePos", "0")
+        behind = wrap_type == "衬于文字下方"
+        anchor.set("behindDoc", "1" if behind else "0")
+        anchor.set("relativeHeight", "0" if behind else "251658240")
+        anchor.set("locked", "0")
+        anchor.set("layoutInCell", "1")
+        anchor.set("allowOverlap", "1")
+
+        simple_pos = OxmlElement("wp:simplePos")
+        simple_pos.set("x", "0")
+        simple_pos.set("y", "0")
+        anchor.append(simple_pos)
+
+        position_h = OxmlElement("wp:positionH")
+        position_h.set("relativeFrom", "margin")
+        align = OxmlElement("wp:align")
+        paragraph = getattr(run, "_paragraph", None)
+        paragraph_alignment = getattr(paragraph, "alignment", None)
+        if paragraph_alignment == WD_PARAGRAPH_ALIGNMENT.CENTER:
+            align.text = "center"
+        elif paragraph_alignment == WD_PARAGRAPH_ALIGNMENT.RIGHT:
+            align.text = "right"
+        else:
+            align.text = "left"
+        position_h.append(align)
+        anchor.append(position_h)
+
+        position_v = OxmlElement("wp:positionV")
+        position_v.set(
+            "relativeFrom",
+            "line" if wrap_type in ("衬于文字下方", "衬于文字上方") else "paragraph",
+        )
+        offset = OxmlElement("wp:posOffset")
+        offset_pt = -float(y_offset_pt)
+        offset.text = str(int(round(offset_pt * 12700)))
+        position_v.append(offset)
+        anchor.append(position_v)
+
+        anchor.append(deepcopy(extent))
+        effect = inline.find(qn("wp:effectExtent"))
+        if effect is not None:
+            anchor.append(deepcopy(effect))
+
+        if wrap_type == "四周型环绕":
+            wrap = OxmlElement("wp:wrapSquare")
+            wrap.set("wrapText", "bothSides")
+        elif wrap_type in ("紧密型环绕", "穿越型环绕"):
+            wrap = OxmlElement(
+                "wp:wrapTight" if wrap_type == "紧密型环绕" else "wp:wrapThrough"
+            )
+            wrap.set("wrapText", "bothSides")
+            polygon = OxmlElement("wp:wrapPolygon")
+            polygon.set("edited", "0")
+            for index, (x, y) in enumerate(
+                ((0, 0), (21600, 0), (21600, 21600), (0, 21600), (0, 0))
+            ):
+                point = OxmlElement("wp:start" if index == 0 else "wp:lineTo")
+                point.set("x", str(x))
+                point.set("y", str(y))
+                polygon.append(point)
+            wrap.append(polygon)
+        elif wrap_type == "上下型环绕":
+            wrap = OxmlElement("wp:wrapTopAndBottom")
+        else:
+            wrap = OxmlElement("wp:wrapNone")
+        anchor.append(wrap)
+
+        for tag in ("wp:docPr", "wp:cNvGraphicFramePr", "a:graphic"):
+            node = inline.find(qn(tag))
+            if node is not None:
+                anchor.append(deepcopy(node))
+        drawing.getparent().replace(drawing, _drawing_with_anchor(anchor))
+
     @staticmethod
     def _make_run_floating(run, *, y_offset_pt: float = 0):
-        """将图片 run 转为 Word 兼容的 VML 浮动对象。"""
+        """将图片 run 转为衬于文字上方的标准 DrawingML 锚点。"""
+        # 页眉页脚仍保留 VML 兼容路径，正文使用 _make_run_anchor。
         inline = run._r.xpath(".//wp:inline")
         if not inline:
             return
@@ -2085,7 +2387,7 @@ class WordFormatter:
         image_height_pt = image_height / 12700
         top_offset = -(image_height_pt / 2) - float(y_offset_pt)
 
-        # python-docx 默认没有注册 VML 的 v/o 前缀，因此此处完整声明命名空间。
+        # 当前 XML 上下文默认没有注册 VML 的 v/o 前缀，因此此处完整声明命名空间。
         pict = parse_xml(
             '<w:pict xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" '
             'xmlns:v="urn:schemas-microsoft-com:vml" '
@@ -2177,7 +2479,7 @@ class WordFormatter:
         :param orientation: 本节纸张方向，``"纵向"``/``"横向"``；与上一节不同时自动交换宽高。
         :param page_width/page_height: 本节纸张宽度/高度，单位 cm，可选。
         :param top/bottom/left/right: 本节页边距，单位 cm；只设置传入的项，
-                                      未传的项沿用 python-docx 新建节的默认值。
+                                      未传的项沿用新建节的默认值。
         :param gutter: 本节装订线宽度，单位 cm，可选。
         """
         # 上一段已经分页时，再使用 NEW_PAGE 会叠加两次换页，产生空白页。
@@ -2250,6 +2552,8 @@ class WordFormatter:
         if pg_num_type is None:
             pg_num_type = OxmlElement("w:pgNumType")
             sect_pr.append(pg_num_type)
+        pg_num_type.attrib.pop(qn("w:start"), None)
+        pg_num_type.attrib.pop(qn("w:fmt"), None)
         pg_num_type.set(qn("w:start"), str(start))
         if fmt is not None:
             pg_num_type.set(qn("w:fmt"), fmt)
@@ -2273,9 +2577,14 @@ class WordFormatter:
         if pg_num_type is None:
             pg_num_type = OxmlElement("w:pgNumType")
             sect_pr.append(pg_num_type)
-        pg_num_type.set(qn("w:fmt"), fmt)
+        existing_start = pg_num_type.get(qn("w:start"))
+        pg_num_type.attrib.pop(qn("w:start"), None)
+        pg_num_type.attrib.pop(qn("w:fmt"), None)
         if start is not None:
             pg_num_type.set(qn("w:start"), str(start))
+        elif existing_start is not None:
+            pg_num_type.set(qn("w:start"), existing_start)
+        pg_num_type.set(qn("w:fmt"), fmt)
         return section
 
     def set_section_page(self, section, *, orientation=None,
@@ -2397,9 +2706,17 @@ class WordFormatter:
         paragraph = footer.paragraphs[0] if footer.paragraphs else footer.add_paragraph()
         for extra in footer.paragraphs[1:]:
             extra._element.getparent().remove(extra._element)
-        # 保留已有 PAGE 域，避免重新设置页脚文字时页码消失。
+        has_page_field = "PAGE" in paragraph._p.xml
+        # 已有 PAGE 域且不需要改变前后缀时直接复用，避免重复页码。
+        if has_page_field and not prefix and not suffix and not show_total_pages:
+            for run in list(paragraph.runs):
+                if not WordFormatter._is_field_run(run):
+                    run._r.getparent().remove(run._r)
+            paragraph.alignment = WordFormatter.resolve_alignment(alignment)
+            return paragraph
+        # 需要重写页码时先清掉已有域，避免旧 PAGE 与新 PAGE 叠加。
         for run in list(paragraph.runs):
-            if not WordFormatter._is_field_run(run):
+            if has_page_field or not WordFormatter._is_field_run(run):
                 run._r.getparent().remove(run._r)
         paragraph.paragraph_format.line_spacing = 1
         paragraph.paragraph_format.space_before = Pt(0)
@@ -2717,7 +3034,7 @@ class WordFormatter:
             switches.append(f'\\t "{style_level_text}"')
         if page_number_separator is not None:
             switches.append(f'\\p "{page_number_separator}"')
-        # right_align_page_numbers: 预留接口，python-docx 暂不支持直接控制
+        # right_align_page_numbers: 预留接口，当前实现暂不支持直接控制
         instruction = f'TOC {" ".join(s for s in switches if s)}'
 
         toc_par = self.doc.add_paragraph("")
@@ -2967,7 +3284,7 @@ class WordFormatter:
         """读取 run 实际生效的字体和直接格式。"""
         name, size = WordFormatter._effective_font(paragraph, run)
         return {
-            "text": run.text,
+            "text": WordFormatter._run_text(run),
             "font_name": name,
             "font_size_pt": round(size.pt, 2) if size is not None else None,
             "bold": run.font.bold is True,
@@ -2988,7 +3305,8 @@ class WordFormatter:
         fonts = []
         for row in table.rows:
             grid.append([
-                cls._truncate(cell.text.strip(), max_text_chars) for cell in row.cells
+                cls._truncate(cls.visible_cell_text(cell).strip(), max_text_chars)
+                for cell in row.cells
             ])
             row_fonts = []
             for cell in row.cells:
@@ -3039,16 +3357,17 @@ class WordFormatter:
                 continue
             index = paragraph_index
             paragraph_index += 1
-            if not include_empty and not item.text.strip():
+            text = WordFormatter.visible_text(item)
+            if not include_empty and not text.strip():
                 continue
             blocks.append({
                 "type": "paragraph",
                 "index": index,
-                "text": self._truncate(item.text, max_text_chars),
+                "text": self._truncate(text, max_text_chars),
                 "style": item.style.name if item.style is not None else None,
                 "runs": [
                     {"run_index": run_index, **self._run_font_info(item, run)}
-                    for run_index, run in enumerate(item.runs)
+                    for run_index, run in enumerate(WordFormatter.visible_runs(item))
                 ],
             })
         return blocks
@@ -3088,12 +3407,336 @@ class WordFormatter:
             max_samples=max_samples,
         )
 
+    # ----------------------------------------------------------------
+    # 审阅模式（tracked changes）底层
+    #
+    # 只使用 OOXML 标准的 w:ins / w:del 记录文字增删，这是三种主流软件共同
+    # 支持的最小集：Office、WPS 的「修订」面板，以及 OnlyOffice 的
+    # 「审阅 → 更改」都能识别、接受或拒绝。刻意不写 w:rPrChange /
+    # w:tcPrChange / w:cellMerge 这些格式与结构类修订——各家支持度差异大，
+    # 而且它们不是「内容改写」需要的。
+    # ----------------------------------------------------------------
+
+    @staticmethod
+    def _revision_stamp() -> str:
+        """修订记录的时间戳，UTC、ISO 8601（``2026-10-30T07:00:00Z``）。"""
+        return _datetime.datetime.now(
+            _datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    @staticmethod
+    def _next_revision_id(any_element) -> int:
+        """取文档内下一个可用的 ``w:id``，保证同一文档里修订 id 不重复。"""
+        root = any_element.getroottree().getroot()
+        counter = _REVISION_IDS.get(root)
+        if counter is None:
+            used = []
+            for value in root.xpath(".//@w:id"):
+                try:
+                    used.append(int(value))
+                except (TypeError, ValueError):
+                    continue
+            counter = max(used, default=0) + 1
+        _REVISION_IDS[root] = counter + 1
+        return counter
+
+    @staticmethod
+    def _revision_runs(paragraph):
+        """按文档顺序返回段落里**可见**的 run。
+
+        与 ``paragraph.runs`` 的区别：包含修订插入（``w:ins``）里的 run，
+        排除修订删除（``w:del``）里的 run。审阅模式下写进去的内容也因此能被
+        后续的定位、替换和 ``describe_blocks`` 看到。
+        """
+        runs = []
+
+        def collect(container):
+            for child in container:
+                if child.tag == qn("w:r"):
+                    runs.append(Run(child, paragraph))
+                elif child.tag in (qn("w:ins"), qn("w:hyperlink"), qn("w:smartTag")):
+                    collect(child)
+
+        collect(paragraph._p)
+        return runs
+
+    @staticmethod
+    def visible_text(paragraph) -> str:
+        """段落里**未被删除**的文字（含已插入的修订内容）。
+
+        审阅模式下 ``paragraph.text`` 只认顶层 ``w:r``，插入内容包在 ``w:ins`` 里
+        会读不到；需要看「当前生效的文字」时用本方法。
+        """
+        return "".join(
+            WordFormatter._run_text(run) for run in WordFormatter._revision_runs(paragraph)
+        )
+
+    @staticmethod
+    def visible_runs(paragraph):
+        """段落里**未被删除**的 run（含 ``w:ins`` 内的插入内容）。
+
+        审阅模式下 ``paragraph.runs`` 只认顶层 ``w:r``，插入的内容包在 ``w:ins``
+        里读不到，``run_index`` 也会对不上；``describe_blocks`` 与 MCP 的 run 引用
+        解析都以本方法为准。
+        """
+        return WordFormatter._revision_runs(paragraph)
+
+    @staticmethod
+    def visible_cell_text(cell) -> str:
+        """单元格里**未被删除**的文字，按段落用换行拼接。"""
+        return "\n".join(
+            WordFormatter.visible_text(paragraph) for paragraph in cell.paragraphs
+        )
+
+    @staticmethod
+    def _make_revision_run(r_pr, elements, *, deleted: bool = False):
+        """按原 run 的 ``rPr`` 造一个新 run；``deleted`` 时把文本节点转成 ``w:delText``。"""
+        run = OxmlElement("w:r")
+        if r_pr is not None:
+            run.append(deepcopy(r_pr))
+        for element in elements:
+            if deleted and element.tag == qn("w:t"):
+                del_text = OxmlElement("w:delText")
+                if element.get(qn("xml:space")) is not None:
+                    del_text.set(qn("xml:space"), element.get(qn("xml:space")))
+                del_text.text = element.text
+                run.append(del_text)
+            elif deleted and element.tag == qn("w:instrText"):
+                del_instr = OxmlElement("w:delInstrText")
+                del_instr.text = element.text
+                run.append(del_instr)
+            else:
+                run.append(element)
+        return run
+
+    @staticmethod
+    def _run_elements_slice(run, start: int, end: int):
+        """按字符区间切片 run 的正文子节点，返回可放进新 run 的元素列表。"""
+        result = []
+        offset = 0
+        for element, text in WordFormatter._run_content_tokens(run):
+            length = len(text)
+            token_start, token_end = offset, offset + length
+            offset = token_end
+            if not length:
+                # 图片、域代码等不占字符的节点：按位置归入对应区间
+                if start <= token_start < end:
+                    result.append(deepcopy(element))
+                continue
+            if token_end <= start or token_start >= end:
+                continue
+            if element.tag != qn("w:t"):
+                result.append(deepcopy(element))
+                continue
+            lo = max(0, start - token_start)
+            hi = min(length, end - token_start)
+            piece = text[lo:hi]
+            if piece:
+                result.extend(WordFormatter._text_elements(piece))
+        return result
+
+    @staticmethod
+    def _unwrap_insertion(run_element) -> None:
+        """把包着 run 的 ``w:ins`` 拆开，让 run 留回段落层级。
+
+        连续改写同一处时，后一次要删的就是前一次插入的内容；如果直接在
+        ``w:ins`` 里再套 ``w:del``，就会产生嵌套修订——这是合法的 OOXML，
+        但 OnlyOffice / WPS 的渲染支持不一致，显示容易错位。这里先把之前的
+        插入标记去掉（修订历史本来也已经被下一次改写覆盖），再在段落层级
+        记录新的删除，保证结构始终是扁平的。
+        """
+        parent = run_element.getparent()
+        if parent is None or parent.tag != qn("w:ins"):
+            return
+        host = parent.getparent()
+        if host is None:
+            return
+        index = list(host).index(parent)
+        for offset, child in enumerate(list(parent)):
+            host.insert(index + offset, child)
+        host.remove(parent)
+
+    @staticmethod
+    def _mark_run_range_deleted(run, start: int, end: int, *,
+                                author: str, date: str):
+        """把 run 内 ``[start, end)`` 的文字标记为修订删除，返回 ``w:del`` 元素。
+
+        run 会被拆成「前 / 中 / 后」三段：前后两段保持原样，中间那段包进 ``w:del``
+        并把 ``w:t`` 换成 ``w:delText``。返回的 ``w:del`` 用于把替换后的新内容插在
+        它后面，保证阅读顺序仍是「旧 → 新」。
+        """
+        total = sum(len(text) for _element, text in WordFormatter._run_content_tokens(run))
+        start = max(0, min(start, total))
+        end = max(start, min(end, total))
+        if start == end:
+            return None
+
+        WordFormatter._unwrap_insertion(run._r)
+        r_pr = run._r.rPr
+        before = WordFormatter._run_elements_slice(run, 0, start)
+        middle = WordFormatter._run_elements_slice(run, start, end)
+        after = WordFormatter._run_elements_slice(run, end, total)
+
+        parent = run._r.getparent()
+        index = list(parent).index(run._r)
+
+        replacement_nodes = []
+        if before:
+            replacement_nodes.append(WordFormatter._make_revision_run(r_pr, before))
+
+        delete = OxmlElement("w:del")
+        delete.set(qn("w:id"), str(WordFormatter._next_revision_id(run._r)))
+        delete.set(qn("w:author"), author)
+        delete.set(qn("w:date"), date)
+        delete.append(
+            WordFormatter._make_revision_run(r_pr, middle, deleted=True)
+        )
+        replacement_nodes.append(delete)
+
+        if after:
+            replacement_nodes.append(WordFormatter._make_revision_run(r_pr, after))
+
+        parent.remove(run._r)
+        for offset, node in enumerate(replacement_nodes):
+            parent.insert(index + offset, node)
+        return delete
+
+    @staticmethod
+    def _insert_revision_text(anchor, r_pr, text: str, *, author: str, date: str):
+        """在 ``anchor`` 元素之后插入 ``w:ins`` 包裹的新 run，返回 ``w:ins`` 元素。"""
+        parent = anchor.getparent()
+        index = list(parent).index(anchor)
+        ins = OxmlElement("w:ins")
+        ins.set(qn("w:id"), str(WordFormatter._next_revision_id(anchor)))
+        ins.set(qn("w:author"), author)
+        ins.set(qn("w:date"), date)
+        ins.append(
+            WordFormatter._make_revision_run(r_pr, WordFormatter._text_elements(text))
+        )
+        parent.insert(index + 1, ins)
+        return ins
+
+    @staticmethod
+    def _revision_author(author: str | None) -> str:
+        return str(author or REVISION_AUTHOR).strip() or REVISION_AUTHOR
+
+    @staticmethod
+    def _tracked_replace_in_paragraph(paragraph, old: str, new: str, *,
+                                      count: int = 1, highlight: bool = False,
+                                      author: str | None = None) -> int:
+        """``replace_text`` 的审阅模式实现：旧文字记为删除、新文字记为插入。"""
+        author = WordFormatter._revision_author(author)
+        date = WordFormatter._revision_stamp()
+        replaced = 0
+        search_from = 0
+        limit = count if count and count > 0 else None
+
+        if old and not WordFormatter._run_text_spans(paragraph):
+            raise ValueError(
+                f"该段落是空的，没有可匹配的文本 {old!r}。"
+                "往空段落/空格子里填内容请把 old 传空串。"
+            )
+
+        if not old:
+            spans = WordFormatter._run_text_spans(paragraph)
+            if spans:
+                last_run = spans[-1][2]
+                ins = WordFormatter._insert_revision_text(
+                    last_run._r, last_run._r.rPr, new, author=author, date=date,
+                )
+                WordFormatter._highlight_revision(ins, highlight)
+            else:
+                name, size = WordFormatter._effective_font(paragraph)
+                run_element = WordFormatter._make_revision_run(
+                    None, WordFormatter._text_elements(new),
+                )
+                WordFormatter.set_run_font(
+                    Run(run_element, paragraph),
+                    cn_font=name or DEFAULT_CN_FONT,
+                    size=size.pt if size is not None else DEFAULT_BODY_SIZE,
+                )
+                ins = OxmlElement("w:ins")
+                ins.set(qn("w:id"), str(WordFormatter._next_revision_id(paragraph._p)))
+                ins.set(qn("w:author"), author)
+                ins.set(qn("w:date"), date)
+                ins.append(run_element)
+                paragraph._p.append(ins)
+                WordFormatter._highlight_revision(ins, highlight)
+            return 1
+
+        while limit is None or replaced < limit:
+            spans = WordFormatter._run_text_spans(paragraph)
+            full_text = "".join(span[3] for span in spans)
+            start = full_text.find(old, search_from)
+            if start < 0:
+                break
+            end = start + len(old)
+            first_index, first_offset = WordFormatter._locate_offset(spans, start)
+            last_index, last_offset = WordFormatter._locate_offset(spans, end, is_end=True)
+            first_run = spans[first_index][2]
+            r_pr = first_run._r.rPr
+
+            anchor = None
+            runs = WordFormatter._revision_runs(paragraph)
+            for index in range(last_index, first_index - 1, -1):
+                run = runs[index]
+                run_length = len(WordFormatter._run_text(run))
+                span_start = first_offset if index == first_index else 0
+                span_end = last_offset if index == last_index else run_length
+                deleted = WordFormatter._mark_run_range_deleted(
+                    run, span_start, span_end, author=author, date=date,
+                )
+                if index == first_index:
+                    anchor = deleted if deleted is not None else run._r
+
+            if new:
+                if anchor is None or anchor.getparent() is None:
+                    paragraph._p.append(
+                        WordFormatter._make_revision_run(r_pr, [])
+                    )
+                    anchor = paragraph._p[-1]
+                ins = WordFormatter._insert_revision_text(
+                    anchor, r_pr, new, author=author, date=date,
+                )
+                WordFormatter._highlight_revision(ins, highlight)
+
+            replaced += 1
+            search_from = start + len(new)
+
+        if not replaced:
+            raise ValueError(f"段落里没有找到要替换的文本 {old!r}。")
+        return replaced
+
+    @staticmethod
+    def _set_run_element_highlight(run_element) -> None:
+        """直接改 ``w:rPr`` 给 run 元素加黄色高亮（不依赖高层 Run 包装）。"""
+        r_pr = run_element.find(qn("w:rPr"))
+        if r_pr is None:
+            r_pr = OxmlElement("w:rPr")
+            run_element.insert(0, r_pr)
+        highlight = r_pr.find(qn("w:highlight"))
+        if highlight is None:
+            highlight = OxmlElement("w:highlight")
+            r_pr.append(highlight)
+        highlight.set(qn("w:val"), "yellow")
+
+    @staticmethod
+    def _highlight_revision(ins_element, enabled: bool):
+        """给修订元素里的新 run 加黄色高亮，方便人眼复核。"""
+        if not enabled:
+            return ins_element
+        if ins_element.tag == qn("w:r"):
+            WordFormatter._set_run_element_highlight(ins_element)
+            return ins_element
+        for run_element in ins_element.findall(qn("w:r")):
+            WordFormatter._set_run_element_highlight(run_element)
+        return ins_element
+
     @staticmethod
     def _run_text_spans(paragraph):
-        """把段落的 run 拼成「字符区间 -> run」的映射，用于按字符定位替换范围。"""
+        """把段落可见 run 拼成「字符区间 -> run」的映射，用于按字符定位替换范围。"""
         spans = []
         offset = 0
-        for run in paragraph.runs:
+        for run in WordFormatter._revision_runs(paragraph):
             text = WordFormatter._run_text(run)
             spans.append((offset, offset + len(text), run, text))
             offset += len(text)
@@ -3102,15 +3745,22 @@ class WordFormatter:
     @staticmethod
     def _run_content_tokens(run):
         """按顺序返回 run 的正文子节点及其可见文本值。"""
-        text_tags = {
-            qn("w:br"), qn("w:cr"), qn("w:noBreakHyphen"),
-            qn("w:ptab"), qn("w:t"), qn("w:tab"),
-        }
-        return [
-            (child, str(child) if child.tag in text_tags else "")
-            for child in run._r
-            if child.tag != qn("w:rPr")
-        ]
+        result = []
+        for child in run._r:
+            if child.tag == qn("w:rPr"):
+                continue
+            if child.tag == qn("w:t"):
+                value = child.text or ""
+            elif child.tag in (qn("w:br"), qn("w:cr")):
+                value = "\n"
+            elif child.tag in (qn("w:tab"), qn("w:ptab")):
+                value = "\t"
+            elif child.tag == qn("w:noBreakHyphen"):
+                value = "-"
+            else:
+                value = ""
+            result.append((child, value))
+        return result
 
     @staticmethod
     def _run_text(run) -> str:
@@ -3229,12 +3879,36 @@ class WordFormatter:
         return run
 
     @staticmethod
+    def _tracked_rewrite_run(run, old: str, replacement: str, *, author: str | None = None):
+        """审阅模式：把 run 里的 ``old`` 记成删除，并把 ``replacement`` 记成插入。
+
+        旧文字不真正消失，而是在「审阅」面板里显示为删除线；新文字以插入修订
+        （带下划线等原格式）紧跟在它后面，接受修订后即为 ``replacement``。
+        """
+        author = WordFormatter._revision_author(author)
+        date = WordFormatter._revision_stamp()
+        r_pr = run._r.rPr
+        text = str(run.text or "")
+        start = text.find(old) if old else len(text)
+        if start < 0:
+            raise ValueError(f"run 里没有找到要替换的文本 {old!r}")
+        deleted = WordFormatter._mark_run_range_deleted(
+            run, start, start + len(old), author=author, date=date,
+        )
+        anchor = deleted if deleted is not None else run._r
+        return WordFormatter._insert_revision_text(
+            anchor, r_pr, replacement, author=author, date=date,
+        )
+
+    @staticmethod
     def fill_underline(
         paragraph,
         run_index: int,
         value: str,
         *,
-        trailing_spaces: int | None = None,
+        trailing_spaces: int | None = 1,
+        track_changes: bool = True,
+        revision_author: str | None = None,
     ) -> dict:
         """填写由带下划线空格组成的模板空位，并保留原空位宽度。
 
@@ -3243,16 +3917,23 @@ class WordFormatter:
         ``一个前导空格 + 值 + 补齐原宽度的尾随空格``。run 原有的字体、字号和
         下划线格式都会保留。
 
+        ``track_changes`` 默认为真：原来的下划线空位记成一条修订删除，填入的值
+        记成一条修订插入（保留下划线），在 Office / WPS / OnlyOffice 的审阅面板里
+        都能接受或拒绝。传 ``False`` 则直接覆盖原空位。
+
         :param paragraph: 目标段落。
         :param run_index: 下划线空白在 ``paragraph.runs`` 中的下标。
         :param value: 要填入的业务值；前后空格由方法自动处理。
+        :param trailing_spaces: 尾随下划线空格数；None 表示按原空位宽度补齐。
+        :param track_changes: 是否以修订（审阅）方式记录改动，默认是。
+        :param revision_author: 修订记录里显示的作者，默认 ``REVISION_AUTHOR``。
         :return: 原长度、替换文本和保留的尾随空格数。
         """
         value = str(value or "").strip()
         if not value:
             raise ValueError("下划线空位要填写的值不能为空")
 
-        runs = paragraph.runs
+        runs = WordFormatter._revision_runs(paragraph)
         if run_index < 0 or run_index >= len(runs):
             raise IndexError(
                 f"run_index {run_index} 超出范围（该段共 {len(runs)} 个 run）"
@@ -3269,12 +3950,18 @@ class WordFormatter:
             trailing_spaces = max(1, len(original) - len(value) - 1)
         trailing_spaces = max(0, int(trailing_spaces))
         replacement = " " + value + " " * trailing_spaces
-        run.text = replacement
+        if track_changes:
+            WordFormatter._tracked_rewrite_run(
+                run, original, replacement, author=revision_author,
+            )
+        else:
+            run.text = replacement
         return {
             "run_index": run_index,
             "original_length": len(original),
             "replacement": replacement,
             "trailing_spaces": trailing_spaces,
+            "track_changes": bool(track_changes),
         }
 
     @staticmethod
@@ -3283,9 +3970,18 @@ class WordFormatter:
         run_index: int,
         old: str,
         new: str,
+        *,
+        leading_spaces: int | None = None,
+        trailing_spaces: int | None = None,
+        track_changes: bool = True,
+        revision_author: str | None = None,
     ) -> dict:
-        """替换带下划线 run 里的可见占位文字，并保留原有下划线格式。"""
-        runs = paragraph.runs
+        """替换带下划线 run 里的可见占位文字，并保留原有下划线格式。
+
+        ``track_changes`` 默认为真：占位文字记成修订删除、新值记成修订插入，
+        下划线格式随原 ``rPr`` 一并保留，Office / WPS / OnlyOffice 都能接受或拒绝。
+        """
+        runs = WordFormatter._revision_runs(paragraph)
         if run_index < 0 or run_index >= len(runs):
             raise IndexError(
                 f"run_index {run_index} 超出范围（该段共 {len(runs)} 个 run）"
@@ -3300,18 +3996,36 @@ class WordFormatter:
             raise ValueError(f"下划线 run 里没有找到占位文字 {old!r}")
         if not new:
             raise ValueError("new 不能为空")
-        replacement = original.replace(old, new, 1)
-        run.text = replacement
+        visible = original.strip()
+        if (
+            visible == old
+            and (leading_spaces is not None or trailing_spaces is not None)
+        ):
+            replacement = (
+                " " * max(0, int(leading_spaces or 0))
+                + new
+                + " " * max(0, int(trailing_spaces or 0))
+            )
+        else:
+            replacement = original.replace(old, new, 1)
+        if track_changes:
+            WordFormatter._tracked_rewrite_run(
+                run, original, replacement, author=revision_author,
+            )
+        else:
+            run.text = replacement
         return {
             "run_index": run_index,
             "old": old,
             "new": new,
             "replacement": replacement,
+            "track_changes": bool(track_changes),
         }
 
     @staticmethod
     def replace_text(paragraph, old: str, new: str, *, count: int = 1,
-                     highlight: bool = False) -> int:
+                     highlight: bool = False, track_changes: bool = True,
+                     revision_author: str | None = None) -> int:
         """在已有段落里把 ``old`` 原地替换为 ``new``，**字体字号沿用原处**。
 
         替换过程不新建 run，只改写原 run 的文本节点，因此填进去的内容自带原位置的
@@ -3323,14 +4037,27 @@ class WordFormatter:
         这类只有标签、值要补在标签后面的填空；模板里的空格子（没有任何 run）
         也走这条路，此时字体按段落样式解析出来，和邻居保持一致。
 
+        ``track_changes`` 默认为真，此时旧文字不会被真正抹掉，而是记成一条
+        ``w:del`` 修订删除、新文字记成 ``w:ins`` 修订插入；在 Office / WPS 的
+        「审阅」面板和 OnlyOffice 的「审阅 → 更改」里都能看到是谁改了什么，
+        并可一键接受或拒绝。传 ``False`` 回到直接改写、不留痕迹的行为。
+
         :param paragraph: 目标段落（``docx.text.paragraph.Paragraph``）。
         :param old: 要被替换掉的原文；空串表示追加到段尾。
         :param new: 新写入的文本。
         :param count: 最多替换几处，默认 1；传 0 表示全部替换。
         :param highlight: 是否把写入 ``new`` 的那个 run 标黄，便于人工复核，默认否。
+        :param track_changes: 是否以修订（审阅）方式记录改动，默认是。
+        :param revision_author: 修订记录里显示的作者，默认 ``REVISION_AUTHOR``。
         :return: 实际替换的处数。
         :raises ValueError: 一处都没匹配上（含对空段落替换非空原文）。
         """
+        if track_changes:
+            return WordFormatter._tracked_replace_in_paragraph(
+                paragraph, old, new, count=count, highlight=highlight,
+                author=revision_author,
+            )
+
         spans = WordFormatter._run_text_spans(paragraph)
         if not spans:
             if old:
@@ -3397,7 +4124,9 @@ class WordFormatter:
 
     @staticmethod
     def insert_cell_image(cell, image_path, *, width=None, height=None,
-                          alignment="居中", keep_text: bool = False):
+                          alignment="居中", keep_text: bool = False,
+                          track_changes: bool = True,
+                          revision_author: str | None = None):
         """把图片放进表格单元格——「此格附身份证正面」这类版式的正确工具。
 
         :meth:`insert_img` 只能往正文追加图片，落到不了一个已有的格子里；而身份证、
@@ -3405,12 +4134,18 @@ class WordFormatter:
 
         ``width`` 与 ``height`` 都省略时按图片自身 DPI 使用原始尺寸。
 
+        ``track_changes`` 默认为真：被替换掉的格内文字记成修订删除，贴进去的图片
+        包在 ``w:ins`` 里成为一条插入修订，Office / WPS / OnlyOffice 都能看到
+        这张图是后加的。
+
         :param cell: ``docx.table._Cell`` 对象。
         :param image_path: 图片路径（str/Path），或图片二进制内容（bytes/bytearray）。
         :param width: 图片宽度，单位 cm，可选。
         :param height: 图片高度，单位 cm，可选。
         :param alignment: 单元格内段落对齐方式，默认居中。
         :param keep_text: 是否保留单元格已有文字，默认否（清空后再贴图，避免挤成一行）。
+        :param track_changes: 是否以修订（审阅）方式记录改动，默认是。
+        :param revision_author: 修订记录里显示的作者，默认 ``REVISION_AUTHOR``。
         :return: 该单元格。
         """
         if width is not None and width <= 0:
@@ -3418,10 +4153,18 @@ class WordFormatter:
         if height is not None and height <= 0:
             raise ValueError(f"图片高度必须大于 0，收到 {height!r}")
 
+        author = WordFormatter._revision_author(revision_author)
+        date = WordFormatter._revision_stamp()
+
         if not keep_text:
             for paragraph in cell.paragraphs:
-                for run in list(paragraph.runs):
-                    run._r.getparent().remove(run._r)
+                if track_changes:
+                    WordFormatter._mark_paragraph_deleted(
+                        paragraph, author=author, date=date,
+                    )
+                else:
+                    for run in list(paragraph.runs):
+                        run._r.getparent().remove(run._r)
 
         paragraph = cell.paragraphs[0]
         paragraph.alignment = WordFormatter.resolve_alignment(alignment, strict=True)
@@ -3430,6 +4173,13 @@ class WordFormatter:
         paragraph.paragraph_format.space_after = Pt(0)
 
         run = paragraph.add_run()
+        if track_changes:
+            ins = OxmlElement("w:ins")
+            ins.set(qn("w:id"), str(WordFormatter._next_revision_id(cell._tc)))
+            ins.set(qn("w:author"), author)
+            ins.set(qn("w:date"), date)
+            paragraph._p.replace(run._r, ins)
+            ins.append(run._r)
         source, owned = WordFormatter._image_stream(image_path)
         try:
             kwargs = {}

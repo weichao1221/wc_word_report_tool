@@ -1,5 +1,6 @@
 from .format_profile import extract_format_profile
 from .numbers import NumberConverter, about_numbers, number_to_chinese_upper
+from .ooxml import Document
 from .word import (
     DEFAULT_BODY_SIZE,
     DEFAULT_CN_FONT,
@@ -16,7 +17,7 @@ from .word import (
     pt_to_font_size,
 )
 
-__version__ = "0.8.3"
+__version__ = "0.8.4"
 
 __all__ = [
     "__version__",
@@ -26,6 +27,7 @@ __all__ = [
     "number_to_chinese_upper",
     # Word 格式化
     "WordFormatter",
+    "Document",
     "about_word",
     # 读取文档格式
     "extract_format_profile",

@@ -3,11 +3,8 @@
 import json
 from pathlib import Path
 
-from docx import Document
-from docx.oxml import OxmlElement
-from docx.oxml.ns import qn
-
 from wc_word_report_tool import WordFormatter, extract_format_profile
+from wc_word_report_tool.ooxml import Document, OxmlElement, qn
 
 
 def _build_report(path: Path) -> Path:

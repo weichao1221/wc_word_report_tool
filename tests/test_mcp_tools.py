@@ -10,12 +10,12 @@ from pathlib import Path
 from zipfile import ZipFile
 
 import pytest
-from docx import Document
 
 from wc_word_report_tool import WordFormatter
 from wc_word_report_tool.mcp import tools
 from wc_word_report_tool.mcp.errors import ToolError
 from wc_word_report_tool.mcp.session import ReportSessionError, SessionStore
+from wc_word_report_tool.ooxml import Document, Pt
 
 TEST_PNG_B64 = (
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk"
@@ -240,8 +240,6 @@ def test_convert_font_size_snaps_and_honours_ties():
 
 
 def test_convert_font_size_accepts_docx_length():
-    from docx.shared import Pt
-
     assert tools.word_convert_font_size(Pt(22))["font_size"] == "二号"
     assert tools.word_convert_font_size(Pt(22))["pt"] == 22.0
 
@@ -334,7 +332,7 @@ def test_word_call_resolves_paragraph_run_and_cell_references():
     assert session.doc.paragraphs[0].runs[0]._r.rPr.rFonts.get(
         "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}eastAsia"
     ) == "黑体"
-    assert cell.text == "新内容"
+    assert WordFormatter.visible_cell_text(cell) == "新内容"
 
 
 def test_word_call_rejects_bad_object_references():
@@ -404,6 +402,24 @@ def test_format_cell_out_of_range_explains_bounds():
 
     assert "超出范围" in str(excinfo.value)
     assert "2 行" in str(excinfo.value)
+
+
+def test_format_cell_uses_font_name_for_latin_text_by_default():
+    doc_id = tools.word_create_report()["doc_id"]
+    tools.word_add_table(doc_id, ["标题"], [["0312-56789012"]])
+
+    tools.word_format_cell(
+        doc_id, row=1, col=0, text="0312-56789012",
+        font_name="宋体", font_size=10.5,
+    )
+    saved = tools.word_save_report(doc_id, "cell-font.docx")
+    document_xml = _read_zip_xml(
+        Path(saved["saved_to"]), "word/document.xml"
+    )
+
+    assert 'w:ascii="宋体"' in document_xml
+    assert 'w:hAnsi="宋体"' in document_xml
+    assert 'w:eastAsia="宋体"' in document_xml
 
 
 def test_add_date_chinese_style():
@@ -710,9 +726,7 @@ def test_header_variant_first_and_even_are_separate():
     tools.word_set_header(doc_id, "偶数页页眉", variant="even")
     saved = tools.word_save_report(doc_id, "header-variants.docx")
 
-    from docx import Document as _Read
-
-    section = _Read(saved["saved_to"]).sections[0]
+    section = Document(saved["saved_to"]).sections[0]
     assert section.header.paragraphs[0].text == "默认页眉"
     assert section.first_page_header.paragraphs[0].text == "首页页眉"
     assert section.even_page_header.paragraphs[0].text == "偶数页页眉"
@@ -735,9 +749,7 @@ def test_clear_header_footer_accepts_variant():
     tools.word_clear_header_footer(doc_id, target="header", variant="first")
     saved = tools.word_save_report(doc_id, "cleared-first.docx")
 
-    from docx import Document as _Read
-
-    section = _Read(saved["saved_to"]).sections[0]
+    section = Document(saved["saved_to"]).sections[0]
     assert section.first_page_header.paragraphs[0].text == ""
 
 
@@ -939,9 +951,7 @@ def test_merge_cells_tool_keeps_only_anchor_text():
     tools.word_merge_cells(doc_id, merges=[{"row": 0, "col": 0, "colspan": 3}])
     saved = tools.word_save_report(doc_id, "merge-existing.docx")
 
-    from docx import Document as _Read
-
-    table = _Read(saved["saved_to"]).tables[0]
+    table = Document(saved["saved_to"]).tables[0]
     assert table.cell(0, 0).text == "A"
 
 
@@ -1045,7 +1055,10 @@ def test_insert_image_supports_floating_for_seals():
     saved = tools.word_save_report(doc_id, "seal.docx")
 
     assert result["floating"] is True
-    assert "w:pict" in _read_zip_xml(Path(saved["saved_to"]), "word/document.xml")
+    xml = _read_zip_xml(Path(saved["saved_to"]), "word/document.xml")
+    assert "wp:anchor" in xml
+    assert "wp:wrapNone" in xml
+    assert 'behindDoc="0"' in xml
 
 
 def test_insert_image_is_inline_by_default():
@@ -1058,6 +1071,91 @@ def test_insert_image_is_inline_by_default():
     assert "w:pict" not in _read_zip_xml(
         Path(saved["saved_to"]), "word/document.xml"
     )
+
+
+@pytest.mark.parametrize(
+    ("wrap_type", "marker"),
+    [
+        ("嵌入型", "wp:inline"),
+        ("四周型环绕", "wp:wrapSquare"),
+        ("紧密型环绕", "wp:wrapTight"),
+        ("穿越型环绕", "wp:wrapThrough"),
+        ("上下型环绕", "wp:wrapTopAndBottom"),
+        ("衬于文字下方", "wp:wrapNone"),
+        ("衬于文字上方", "wp:wrapNone"),
+    ],
+)
+def test_insert_image_supports_all_wrap_types(wrap_type, marker):
+    doc_id = tools.word_create_report()["doc_id"]
+    tools.word_add_body(doc_id, "图片位置")
+
+    result = tools.word_insert_image(
+        doc_id,
+        width_cm=3,
+        image_base64=TEST_PNG_B64,
+        paragraph_index=0,
+        wrap_type=wrap_type,
+    )
+    saved = tools.word_save_report(doc_id, f"wrap-{wrap_type}.docx")
+    xml = _read_zip_xml(Path(saved["saved_to"]), "word/document.xml")
+
+    assert result["wrap_type"] == wrap_type
+    assert marker in xml
+    if wrap_type == "衬于文字下方":
+        assert 'behindDoc="1"' in xml
+    elif wrap_type != "嵌入型":
+        assert 'behindDoc="0"' in xml
+
+
+def test_insert_image_rejects_unknown_wrap_type():
+    doc_id = tools.word_create_report()["doc_id"]
+    tools.word_add_body(doc_id, "原正文")
+
+    with pytest.raises(ToolError, match="未知图片环绕方式"):
+        tools.word_insert_image(
+            doc_id, image_base64=TEST_PNG_B64, wrap_type="奇怪环绕",
+        )
+    assert [paragraph.text for paragraph in tools._STORE.get(doc_id).doc.paragraphs] == [
+        "原正文"
+    ]
+
+
+def test_insert_image_can_follow_a_target_paragraph():
+    doc_id = tools.word_create_report()["doc_id"]
+    tools.word_add_body(doc_id, "第一段")
+    tools.word_add_body(doc_id, "照片位置")
+    tools.word_add_body(doc_id, "第三段")
+
+    result = tools.word_insert_image(
+        doc_id,
+        width_cm=3,
+        image_base64=TEST_PNG_B64,
+        paragraph_index=1,
+    )
+    saved = tools.word_save_report(doc_id, "placed-image.docx")
+    paragraphs = Document(saved["saved_to"]).paragraphs
+
+    assert result["paragraph_index"] == 1
+    assert [paragraph.text for paragraph in paragraphs] == [
+        "第一段",
+        "照片位置",
+        "",
+        "第三段",
+    ]
+    assert paragraphs[2]._p.xpath(".//w:drawing")
+
+
+def test_insert_image_rejects_paragraph_index_out_of_range():
+    doc_id = tools.word_create_report()["doc_id"]
+    tools.word_add_body(doc_id, "唯一段落")
+
+    with pytest.raises(ToolError, match="paragraph_index 5 超出范围"):
+        tools.word_insert_image(
+            doc_id,
+            width_cm=3,
+            image_base64=TEST_PNG_B64,
+            paragraph_index=5,
+        )
 
 
 def test_add_table_grid_mismatch_becomes_readable_tool_error():
@@ -1158,8 +1256,8 @@ def _make_template(tmp_path: Path) -> Path:
     WordFormatter.set_run_font(
         par.add_run("标段名称："), cn_font="仿宋_GB2312", size="三号")
     table = document.add_table(rows=1, cols=2)
-    WordFormatter.set_cell(table.cell(0, 0), "费率：")
-    WordFormatter.set_cell(table.cell(0, 1), "%")
+    WordFormatter.set_cell(table.cell(0, 0), "费率：", track_changes=False)
+    WordFormatter.set_cell(table.cell(0, 1), "%", track_changes=False)
     source = tmp_path / "template.docx"
     document.save(str(source))
     return source
@@ -1294,7 +1392,8 @@ def test_fill_underline_keeps_width_and_underline(tmp_path):
 
     assert result["replacement"].startswith(" ")
     assert result["replacement"].endswith(" ")
-    assert len(result["replacement"]) == result["original_length"]
+    assert result["trailing_spaces"] == 1
+    assert len(result["replacement"]) == len("河北省雄安新区金湖街88号") + 2
     assert result["paragraph_text"] == "地址：" + result["replacement"]
     saved = tools.word_save_report(doc_id, "underline-filled.docx")
     xml = _read_zip_xml(Path(saved["saved_to"]), "word/document.xml")
@@ -1365,6 +1464,28 @@ def test_replace_underline_text_keeps_visible_placeholder_format(tmp_path):
     assert "<w:u " in xml
 
 
+def test_replace_underline_text_can_normalize_spaces(tmp_path):
+    document = Document()
+    paragraph = document.add_paragraph()
+    run = paragraph.add_run("        （招标项目名称、招标编号）        ")
+    run.font.underline = True
+    source = tmp_path / "underline-spaces.docx"
+    document.save(source)
+    doc_id = tools.word_open_report(str(source))["doc_id"]
+
+    result = tools.word_replace_underline_text(
+        doc_id,
+        paragraph_index=0,
+        run_index=0,
+        old="（招标项目名称、招标编号）",
+        new="项目名称、RXZB-2026-1026",
+        leading_spaces=1,
+        trailing_spaces=1,
+    )
+
+    assert result["replacement"] == " 项目名称、RXZB-2026-1026 "
+
+
 def test_insert_cell_image_puts_picture_into_cell(tmp_path):
     source = _make_template(tmp_path)
     png = tmp_path / "id.png"
@@ -1393,3 +1514,186 @@ def test_insert_cell_image_rejects_out_of_range_cell(tmp_path):
             doc_id, row=9, col=0, table_index=0, image_path=str(png))
 
     assert "超出范围" in str(excinfo.value)
+
+
+# ====================================================================
+# 审阅模式（tracked changes）在工具层的默认行为
+# ====================================================================
+
+def test_replace_text_tool_tracks_changes_by_default(tmp_path):
+    source = _make_template(tmp_path)
+    doc_id = tools.word_open_report(str(source))["doc_id"]
+
+    result = tools.word_replace_text(
+        doc_id, "标段名称：", "标段名称：一标段", paragraph_index=0)
+
+    assert result["track_changes"] is True
+    assert result["paragraph_text"] == "标段名称：一标段"
+    saved = tools.word_save_report(doc_id, "tracked.docx")
+    xml = _read_zip_xml(Path(saved["saved_to"]), "word/document.xml")
+    assert "<w:ins " in xml and "<w:del " in xml
+
+
+def test_replace_text_tool_can_disable_tracking(tmp_path):
+    source = _make_template(tmp_path)
+    doc_id = tools.word_open_report(str(source))["doc_id"]
+
+    tools.word_replace_text(
+        doc_id, "标段名称：", "标段名称：一标段", paragraph_index=0,
+        track_changes=False)
+
+    saved = tools.word_save_report(doc_id, "plain.docx")
+    xml = _read_zip_xml(Path(saved["saved_to"]), "word/document.xml")
+    assert "标段名称：一标段" in xml
+
+    blocks = tools.word_list_blocks(doc_id)["blocks"]
+    paragraph = next(block for block in blocks if block["type"] == "paragraph")
+    assert paragraph["text"] == "标段名称：一标段"
+    assert tools._STORE.get(doc_id).doc.paragraphs[0]._p.xpath(".//w:ins") == []
+
+
+def test_replace_text_tool_accepts_custom_revision_author(tmp_path):
+    source = _make_template(tmp_path)
+    doc_id = tools.word_open_report(str(source))["doc_id"]
+
+    tools.word_replace_text(
+        doc_id, "标段名称：", "标段名称：一标段", paragraph_index=0,
+        revision_author="张三")
+
+    saved = tools.word_save_report(doc_id, "author.docx")
+    xml = _read_zip_xml(Path(saved["saved_to"]), "word/document.xml")
+    assert 'w:author="张三"' in xml
+
+
+def test_fill_underline_tool_tracks_by_default(tmp_path):
+    document = Document()
+    paragraph = document.add_paragraph()
+    paragraph.add_run("地址：")
+    blank = paragraph.add_run(" " * 12)
+    blank.font.underline = True
+    source = tmp_path / "u.docx"
+    document.save(source)
+    doc_id = tools.word_open_report(str(source))["doc_id"]
+
+    result = tools.word_fill_underline(
+        doc_id, paragraph_index=0, run_index=1, new="金湖街88号")
+
+    assert result["track_changes"] is True
+    saved = tools.word_save_report(doc_id, "u-out.docx")
+    assert "<w:del " in _read_zip_xml(Path(saved["saved_to"]), "word/document.xml")
+
+
+def test_format_cell_tool_tracks_by_default(tmp_path):
+    source = _make_template(tmp_path)
+    doc_id = tools.word_open_report(str(source))["doc_id"]
+
+    tools.word_format_cell(doc_id, row=0, col=1, text="90%", table_index=0)
+
+    saved = tools.word_save_report(doc_id, "cell-tracked.docx")
+    xml = _read_zip_xml(Path(saved["saved_to"]), "word/document.xml")
+    assert "<w:ins " in xml and "<w:del " in xml
+    blocks = tools.word_list_blocks(doc_id)["blocks"]
+    table = next(block for block in blocks if block["type"] == "table")
+    assert table["grid"][0][1] == "90%"
+
+
+def test_word_call_passes_track_changes_to_set_cell():
+    doc_id = tools.word_create_report()["doc_id"]
+    session = tools._STORE.get(doc_id)
+    cell = session.doc.add_table(rows=1, cols=1).cell(0, 0)
+    WordFormatter.set_cell(cell, "旧", track_changes=False)
+
+    tools.word_call(
+        doc_id, "set_cell",
+        {"cell": {"table_index": -1, "row": 0, "col": 0}, "text": "新"},
+    )
+
+    assert "<w:del " in cell._tc.xml
+    assert WordFormatter.visible_cell_text(cell) == "新"
+
+def test_word_format_run_applies_long_tail_toggles():
+    doc_id = tools.word_create_report(title="开关")["doc_id"]
+    tools.word_add_body(doc_id, "需要特殊格式的文字")
+
+    result = tools.word_format_run(
+        doc_id,
+        run_index=0,
+        paragraph_index=0,
+        strike=True,
+        small_caps=True,
+        hidden=True,
+        subscript=True,
+        font_name="黑体",
+        font_size="三号",
+        color="FF0000",
+    )
+    applied = result["format"]
+    assert applied["strike"] is True
+    assert applied["small_caps"] is True
+    assert applied["hidden"] is True
+    assert applied["subscript"] is True
+    assert applied["font_name"] == "黑体"
+    assert applied["font_size_pt"] == 16.0
+    assert applied["color"] == "FF0000"
+
+    saved = tools.word_save_report(doc_id, "run-format.docx")
+    xml = _read_zip_xml(Path(saved["saved_to"]), "word/document.xml")
+    for marker in ("<w:strike", "<w:smallCaps", "<w:vanish", "<w:vertAlign"):
+        assert marker in xml
+    assert 'w:eastAsia="黑体"' in xml
+
+
+def test_word_format_run_leaves_unpassed_fields_alone():
+    doc_id = tools.word_create_report()["doc_id"]
+    tools.word_add_body(doc_id, "原样保留")
+
+    before = tools.word_format_run(doc_id, run_index=0, paragraph_index=0)["format"]
+    tools.word_format_run(doc_id, run_index=0, paragraph_index=0, strike=True)
+    after = tools.word_format_run(doc_id, run_index=0, paragraph_index=0)["format"]
+
+    assert after["strike"] is True
+    # 只改了 strike，其余字段（含 word_add_body 写入的颜色）原样不动
+    changed = {key for key in before if before[key] != after[key]}
+    assert changed == {"strike"}
+
+
+def test_word_format_run_reports_actionable_errors():
+    doc_id = tools.word_create_report()["doc_id"]
+    tools.word_add_body(doc_id, "文字")
+
+    with pytest.raises(ToolError, match="run_index"):
+        tools.word_format_run(doc_id, run_index=9, paragraph_index=0)
+    with pytest.raises(ToolError, match="subscript"):
+        tools.word_format_run(
+            doc_id,
+            run_index=0,
+            paragraph_index=0,
+            subscript=True,
+            superscript=True,
+        )
+
+
+def test_word_set_table_direction_round_trip():
+    doc_id = tools.word_create_report()["doc_id"]
+    tools.word_add_table(doc_id, ["A", "B"], [["1", "2"]])
+
+    assert tools.word_set_table_direction(doc_id, "rtl")["table_direction"] == "RTL"
+    assert tools.word_set_table_direction(doc_id, "ltr")["table_direction"] == "LTR"
+    assert tools.word_set_table_direction(doc_id, "inherit")["direction"] == "inherit"
+
+    with pytest.raises(ToolError, match="direction"):
+        tools.word_set_table_direction(doc_id, "diagonal")
+
+
+def test_word_set_section_start_type_round_trip():
+    doc_id = tools.word_create_report()["doc_id"]
+    tools.word_add_body(doc_id, "正文")
+
+    assert tools.word_set_section_start_type(doc_id, "oddPage")["start_type"] == "ODD_PAGE"
+    assert (
+        tools.word_set_section_start_type(doc_id, "next_page")["start_type"] == "NEW_PAGE"
+    )
+
+    with pytest.raises(ToolError, match="start_type"):
+        tools.word_set_section_start_type(doc_id, "whenever")
+

@@ -43,6 +43,8 @@ EXPECTED_TOOLS = {
     "word_merge_cells",
     "word_format_cell",
     "word_set_table_borders",
+    "word_set_table_direction",
+    "word_format_run",
     "word_list_blocks",
     "word_describe_format_profile",
     "word_replace_text",
@@ -59,6 +61,7 @@ EXPECTED_TOOLS = {
     "word_set_header_image",
     "word_insert_section",
     "word_set_section_page",
+    "word_set_section_start_type",
     "word_set_page_numbers",
     "word_restart_page_numbering",
     "word_set_page_number_start",
@@ -122,6 +125,8 @@ def test_image_tools_expose_both_input_channels():
 
     assert "image_path" in properties
     assert "image_base64" in properties
+    assert "paragraph_index" in properties
+    assert "wrap_type" in properties
 
 
 def test_every_tool_has_a_description():

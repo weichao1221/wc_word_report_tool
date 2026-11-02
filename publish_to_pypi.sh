@@ -5,12 +5,18 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
 
-rm -rf dist build src/*.egg-info(N)
+VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' pyproject.toml)"
+
+rm -rf dist build
+rm -rf src/*.egg-info 2>/dev/null || true
 python3 -m build
 python3 -m twine check dist/*
 
 echo
-echo "构建校验通过。PyPI 发布由 GitHub Actions 完成："
-echo "  1. 提交版本变更并推送 main"
-echo "  2. git tag v0.7.6"
-echo "  3. git push origin v0.7.6"
+echo "构建校验通过，当前版本 v${VERSION}。"
+echo "PyPI 发布有两条路："
+echo "  A) 手动上传（当前可用，需要本机 ~/.pypirc 里有 API token）："
+echo "       python3 -m twine upload dist/*"
+echo "  B) 推标签触发 GitHub Actions（需先在 PyPI 配好 Trusted Publisher）："
+echo "       git tag v${VERSION} && git push origin v${VERSION}"
+echo "     未配置时会报 invalid-publisher —— v0.7.6 / v0.8.0 / v0.8.3 都是这么失败的。"

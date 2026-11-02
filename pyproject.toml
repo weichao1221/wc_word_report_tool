@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "wc_word_report_tool"
-version = "0.8.3"
+version = "0.8.4"
 description = "Chinese Word report formatter: tables, headers/footers, TOC, page numbering, cover, headings."
 readme = "README.md"
 requires-python = ">=3.9"
@@ -13,7 +13,7 @@ authors = [
   { name = "willcha" }
 ]
 dependencies = [
-  "python-docx>=1.1.0"
+  "lxml>=4.9"
 ]
 keywords = ["word", "docx", "chinese", "rmb", "formatter"]
 classifiers = [
@@ -47,6 +47,9 @@ package-dir = {"" = "src"}
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+wc_word_report_tool = ["ooxml/default.docx"]
 
 [tool.ruff.lint]
 select = ["E4", "E7", "E9", "F", "I"]

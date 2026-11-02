@@ -13,8 +13,7 @@ from __future__ import annotations
 
 from zipfile import BadZipFile, LargeZipFile
 
-from docx.opc.exceptions import PackageNotFoundError
-
+from ..ooxml import PackageNotFoundError
 from .session import ReportSessionError
 
 

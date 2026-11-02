@@ -4,12 +4,16 @@ from pathlib import Path
 from zipfile import ZipFile
 
 import pytest
-from docx import Document
-from docx.enum.text import WD_PARAGRAPH_ALIGNMENT
-from docx.oxml.ns import qn
-from docx.shared import Cm, Pt
 
 from wc_word_report_tool import WordFormatter
+from wc_word_report_tool.ooxml import (
+    WD_PARAGRAPH_ALIGNMENT,
+    WD_SECTION_START,
+    Cm,
+    Document,
+    Pt,
+    qn,
+)
 from wc_word_report_tool.word import (
     FONT_SIZE_MAP,
     PT_TO_FONT_SIZE_MAP,
@@ -432,7 +436,7 @@ def test_set_cell_supports_bold_and_alignment(tmp_path):
     table = doc.add_table(rows=1, cols=1)
     WordFormatter.set_cell(
         table.rows[0].cells[0], "表头",
-        bold=True, alignment="居中",
+        bold=True, alignment="居中", track_changes=False,
     )
     out = tmp_path / "cell.docx"
     doc.save(out)
@@ -440,6 +444,22 @@ def test_set_cell_supports_bold_and_alignment(tmp_path):
     cell = table.rows[0].cells[0]
     assert cell.paragraphs[0].alignment == WD_PARAGRAPH_ALIGNMENT.CENTER
     assert cell.paragraphs[0].runs[0].font.bold is True
+
+
+def test_set_cell_supports_matching_cjk_and_latin_font(tmp_path):
+    doc = Document()
+    table = doc.add_table(rows=1, cols=1)
+    WordFormatter.set_cell(
+        table.cell(0, 0), "0312-56789012",
+        font_name="宋体", en_font="宋体", track_changes=False,
+    )
+    out = tmp_path / "cell-font.docx"
+    doc.save(out)
+
+    document_xml = _read_zip_xml(out, "word/document.xml")
+    assert 'w:ascii="宋体"' in document_xml
+    assert 'w:hAnsi="宋体"' in document_xml
+    assert 'w:eastAsia="宋体"' in document_xml
 
 
 def test_add_table_creates_table_with_headers(tmp_path):
@@ -472,8 +492,8 @@ def test_set_cell_clears_existing_runs():
     doc = Document()
     table = doc.add_table(rows=1, cols=1)
     cell = table.rows[0].cells[0]
-    WordFormatter.set_cell(cell, "第一次")
-    WordFormatter.set_cell(cell, "第二次")
+    WordFormatter.set_cell(cell, "第一次", track_changes=False)
+    WordFormatter.set_cell(cell, "第二次", track_changes=False)
     assert len(cell.paragraphs[0].runs) == 1
     assert cell.paragraphs[0].text == "第二次"
 
@@ -485,7 +505,6 @@ def test_set_cell_clears_existing_runs():
 def test_set_header(tmp_path):
     doc = Document()
     doc.add_paragraph("正文")
-    from docx.enum.section import WD_SECTION_START
     doc.add_section(WD_SECTION_START.NEW_PAGE)
     doc.add_paragraph("第二页")
 
@@ -510,7 +529,6 @@ def test_set_header(tmp_path):
 def test_set_footer_uses_kaiti_font(tmp_path):
     doc = Document()
     doc.add_paragraph("正文")
-    from docx.enum.section import WD_SECTION_START
     doc.add_section(WD_SECTION_START.NEW_PAGE)
     doc.add_paragraph("第二页")
 
@@ -567,7 +585,6 @@ def test_set_page_number_from_section_clears_previous_sections(tmp_path):
     doc = Document()
     doc.add_paragraph("前置内容")
 
-    from docx.enum.section import WD_SECTION_START
     doc.add_section(WD_SECTION_START.NEW_PAGE)
     doc.add_paragraph("正文第一页")
 
@@ -794,8 +811,7 @@ def test_header_variants_write_to_separate_parts(tmp_path):
     out = tmp_path / "variants-parts.docx"
     doc.save(out)
 
-    from docx import Document as _Read
-    reopened = _Read(str(out))
+    reopened = Document(str(out))
     section = reopened.sections[0]
 
     assert section.header.paragraphs[0].text == "默认页眉"
@@ -1137,8 +1153,9 @@ def test_insert_img_supports_floating(tmp_path):
     doc.save(out)
 
     document_xml = _read_zip_xml(out, "word/document.xml")
-    assert "w:pict" in document_xml
-    assert "v:shape" in document_xml
+    assert "wp:anchor" in document_xml
+    assert "wp:wrapNone" in document_xml
+    assert 'behindDoc="0"' in document_xml
 
 
 def test_insert_img_is_inline_by_default(tmp_path):
@@ -1150,6 +1167,59 @@ def test_insert_img_is_inline_by_default(tmp_path):
     document_xml = _read_zip_xml(out, "word/document.xml")
     assert "w:pict" not in document_xml
     assert "wp:inline" in document_xml
+
+
+def test_insert_img_can_target_a_paragraph(tmp_path):
+    doc = Document()
+    formatter = WordFormatter(doc)
+    formatter.body("第一段")
+    formatter.body("图片应插在这里")
+    formatter.body("第三段")
+
+    formatter.insert_img(
+        _write_test_png(tmp_path / "placed.png"),
+        3.0,
+        paragraph_index=1,
+    )
+
+    assert [paragraph.text for paragraph in doc.paragraphs] == [
+        "第一段",
+        "图片应插在这里",
+        "",
+        "第三段",
+    ]
+    assert doc.paragraphs[2]._p.xpath(".//w:drawing")
+
+
+def test_insert_img_paragraph_index_supports_negative_index(tmp_path):
+    doc = Document()
+    formatter = WordFormatter(doc)
+    formatter.body("第一段")
+    formatter.body("最后一段")
+
+    formatter.insert_img(
+        _write_test_png(tmp_path / "last.png"),
+        3.0,
+        paragraph_index=-1,
+    )
+
+    assert [paragraph.text for paragraph in doc.paragraphs] == [
+        "第一段",
+        "最后一段",
+        "",
+    ]
+
+
+def test_insert_img_rejects_paragraph_index_out_of_range(tmp_path):
+    doc = Document()
+    WordFormatter(doc).body("唯一段落")
+
+    with pytest.raises(ValueError, match="paragraph_index 3 超出范围"):
+        WordFormatter(doc).insert_img(
+            _write_test_png(tmp_path / "range.png"),
+            3.0,
+            paragraph_index=3,
+        )
 
 
 # ====================================================================
@@ -1574,7 +1644,8 @@ def test_replace_text_keeps_original_run_format(tmp_path):
     par = doc.add_paragraph()
     WordFormatter.set_run_font(par.add_run("标段名称："), cn_font="仿宋_GB2312", size="三号")
 
-    assert WordFormatter.replace_text(par, "标段名称：", "标段名称：一标段") == 1
+    assert WordFormatter.replace_text(
+        par, "标段名称：", "标段名称：一标段", track_changes=False) == 1
     assert par.text == "标段名称：一标段"
 
     out = tmp_path / "replace.docx"
@@ -1592,7 +1663,7 @@ def test_replace_text_spans_multiple_runs():
     WordFormatter.set_run_font(par.add_run("项目名称："), cn_font="宋体", size=14)
     WordFormatter.set_run_font(par.add_run("测试项目"), cn_font="宋体", size=14)
 
-    assert WordFormatter.replace_text(par, "名称：测试", "名称：雄安") == 1
+    assert WordFormatter.replace_text(par, "名称：测试", "名称：雄安", track_changes=False) == 1
     assert par.text == "项目名称：雄安项目"
 
 
@@ -1607,7 +1678,7 @@ def test_replace_text_uses_matching_run_at_adjacent_boundary():
     value.font.name = "宋体"
     value.font.size = Pt(10.5)
 
-    assert WordFormatter.replace_text(par, "值", "新值") == 1
+    assert WordFormatter.replace_text(par, "值", "新值", track_changes=False) == 1
 
     assert [run.text for run in par.runs] == ["标签", "新值"]
     assert par.runs[1].font.name == "宋体"
@@ -1619,10 +1690,10 @@ def test_replace_text_preserves_tabs_and_line_breaks():
     par = doc.add_paragraph()
     par.add_run("A\tB\nC")
 
-    assert WordFormatter.replace_text(par, "B", "X") == 1
+    assert WordFormatter.replace_text(par, "B", "X", track_changes=False) == 1
     assert par.text == "A\tX\nC"
 
-    assert WordFormatter.replace_text(par, "\t", "-") == 1
+    assert WordFormatter.replace_text(par, "\t", "-", track_changes=False) == 1
     assert par.text == "A-X\nC"
 
 
@@ -1634,7 +1705,7 @@ def test_replace_text_keeps_drawing_order_inside_run(tmp_path):
     run.add_picture(str(_write_test_png(tmp_path / "inline.png")), width=Cm(1))
     run.add_text("后")
 
-    assert WordFormatter.replace_text(paragraph, "后", "新后") == 1
+    assert WordFormatter.replace_text(paragraph, "后", "新后", track_changes=False) == 1
 
     xml = run._r.xml
     assert xml.index("前") < xml.index("<w:drawing") < xml.index("新后")
@@ -1645,7 +1716,7 @@ def test_replace_text_count_zero_does_not_reprocess_replacement():
     par = doc.add_paragraph()
     par.add_run("A/A")
 
-    assert WordFormatter.replace_text(par, "A", "AA", count=0) == 2
+    assert WordFormatter.replace_text(par, "A", "AA", count=0, track_changes=False) == 2
     assert par.text == "AA/AA"
 
 
@@ -1655,7 +1726,7 @@ def test_replace_text_with_empty_old_appends_to_paragraph():
     par = doc.add_paragraph()
     WordFormatter.set_run_font(par.add_run("委托代理人身份证号码："), cn_font="宋体", size=12)
 
-    assert WordFormatter.replace_text(par, "", "110101199001011234") == 1
+    assert WordFormatter.replace_text(par, "", "110101199001011234", track_changes=False) == 1
     assert par.text == "委托代理人身份证号码：110101199001011234"
 
 
@@ -1667,10 +1738,12 @@ def test_fill_underline_preserves_width_and_format(tmp_path):
     WordFormatter.set_run_font(blank, cn_font="宋体", size=10.5)
     blank.font.underline = True
 
-    result = WordFormatter.fill_underline(par, 1, "河北省雄安新区金湖街88号")
+    result = WordFormatter.fill_underline(
+        par, 1, "河北省雄安新区金湖街88号", track_changes=False)
 
     assert result["original_length"] == 24
-    assert len(result["replacement"]) == 24
+    assert result["trailing_spaces"] == 1
+    assert len(result["replacement"]) == len("河北省雄安新区金湖街88号") + 2
     assert result["replacement"].startswith(" ")
     assert result["replacement"].endswith(" ")
     assert par.runs[1].text == result["replacement"]
@@ -1704,7 +1777,7 @@ def test_fill_underline_in_table_cell_can_disable_trailing_spaces():
     par.add_run("元")
 
     result = WordFormatter.fill_underline(
-        par, 0, "128000", trailing_spaces=0
+        par, 0, "128000", trailing_spaces=0, track_changes=False
     )
 
     assert result["replacement"] == " 128000"
@@ -1719,11 +1792,42 @@ def test_replace_underline_text_keeps_surrounding_spaces_and_underline():
     run.font.underline = True
 
     result = WordFormatter.replace_underline_text(
-        par, 0, "（招标项目名称、招标编号）", "项目名称、RXZB-2026-1026"
+        par, 0, "（招标项目名称、招标编号）", "项目名称、RXZB-2026-1026",
+        track_changes=False,
     )
 
     assert result["replacement"] == "    项目名称、RXZB-2026-1026    "
     assert par.runs[0].underline is True
+
+
+def test_replace_underline_text_can_normalize_surrounding_spaces():
+    doc = Document()
+    par = doc.add_paragraph()
+    run = par.add_run("        （招标项目名称、招标编号）        ")
+    run.font.underline = True
+
+    result = WordFormatter.replace_underline_text(
+        par,
+        0,
+        "（招标项目名称、招标编号）",
+        "项目名称、RXZB-2026-1026",
+        leading_spaces=1,
+        trailing_spaces=1,
+        track_changes=False,
+    )
+
+    assert result["replacement"] == " 项目名称、RXZB-2026-1026 "
+
+
+def test_add_footer_page_number_reuses_existing_page_field():
+    doc = Document()
+    section = doc.sections[0]
+
+    WordFormatter.add_footer_page_number(section)
+    WordFormatter.add_footer_page_number(section)
+
+    xml = section.footer._element.xml
+    assert xml.count("PAGE") == 1
 
 
 def test_replace_text_fills_empty_cell_with_style_font(tmp_path):
@@ -1732,7 +1836,8 @@ def test_replace_text_fills_empty_cell_with_style_font(tmp_path):
     WordFormatter(doc).set_paragraph_style("Normal", font_name="楷体", font_size=15)
     table = doc.add_table(rows=1, cols=1)
 
-    assert WordFormatter.replace_text(table.cell(0, 0).paragraphs[0], "", "赵六") == 1
+    assert WordFormatter.replace_text(
+        table.cell(0, 0).paragraphs[0], "", "赵六", track_changes=False) == 1
     assert table.cell(0, 0).text == "赵六"
 
     out = tmp_path / "empty-cell.docx"
@@ -1816,7 +1921,8 @@ def test_replace_text_count_zero_replaces_every_occurrence():
     par = doc.add_paragraph()
     par.add_run("占位/占位/占位")
 
-    assert WordFormatter.replace_text(par, "占位", "值", count=0) == 3
+    assert WordFormatter.replace_text(
+        par, "占位", "值", count=0, track_changes=False) == 3
     assert par.text == "值/值/值"
 
 
@@ -1825,7 +1931,8 @@ def test_replace_text_count_limits_replacements():
     par = doc.add_paragraph()
     par.add_run("占位/占位/占位")
 
-    assert WordFormatter.replace_text(par, "占位", "值", count=2) == 2
+    assert WordFormatter.replace_text(
+        par, "占位", "值", count=2, track_changes=False) == 2
     assert par.text == "值/值/占位"
 
 
@@ -1851,7 +1958,8 @@ def test_replace_text_highlight_marks_filled_run(tmp_path):
     par = doc.add_paragraph()
     par.add_run("项目名称：")
 
-    WordFormatter.replace_text(par, "项目名称：", "项目名称：雄安", highlight=True)
+    WordFormatter.replace_text(
+        par, "项目名称：", "项目名称：雄安", highlight=True, track_changes=False)
     out = tmp_path / "replace-hl.docx"
     doc.save(out)
 
@@ -1863,7 +1971,8 @@ def test_replace_text_without_highlight_leaves_format_clean(tmp_path):
     par = doc.add_paragraph()
     par.add_run("项目名称：")
 
-    WordFormatter.replace_text(par, "项目名称：", "项目名称：雄安")
+    WordFormatter.replace_text(
+        par, "项目名称：", "项目名称：雄安", track_changes=False)
     out = tmp_path / "replace-nohl.docx"
     doc.save(out)
 
@@ -1876,7 +1985,7 @@ def test_set_cell_removes_extra_paragraphs():
     cell.text = "第一段"
     cell.add_paragraph("第二段")
 
-    WordFormatter.set_cell(cell, "新内容")
+    WordFormatter.set_cell(cell, "新内容", track_changes=False)
 
     assert [paragraph.text for paragraph in cell.paragraphs] == ["新内容"]
 
@@ -1884,10 +1993,11 @@ def test_set_cell_removes_extra_paragraphs():
 def test_insert_cell_image_lands_inside_the_cell(tmp_path):
     doc = Document()
     table = doc.add_table(rows=1, cols=1)
-    WordFormatter.set_cell(table.cell(0, 0), "此格附身份证正面")
+    WordFormatter.set_cell(table.cell(0, 0), "此格附身份证正面", track_changes=False)
     png = _write_test_png(tmp_path / "id.png")
 
-    returned = WordFormatter.insert_cell_image(table.cell(0, 0), png, width=5)
+    returned = WordFormatter.insert_cell_image(
+        table.cell(0, 0), png, width=5, track_changes=False)
 
     assert returned.text == ""
     out = tmp_path / "cell-image.docx"
@@ -1902,10 +2012,11 @@ def test_insert_cell_image_lands_inside_the_cell(tmp_path):
 def test_insert_cell_image_keep_text_preserves_caption(tmp_path):
     doc = Document()
     table = doc.add_table(rows=1, cols=1)
-    WordFormatter.set_cell(table.cell(0, 0), "身份证正面")
+    WordFormatter.set_cell(table.cell(0, 0), "身份证正面", track_changes=False)
     png = _write_test_png(tmp_path / "id2.png")
 
-    WordFormatter.insert_cell_image(table.cell(0, 0), png, width=5, keep_text=True)
+    WordFormatter.insert_cell_image(
+        table.cell(0, 0), png, width=5, keep_text=True, track_changes=False)
     out = tmp_path / "cell-image-keep.docx"
     doc.save(out)
 
@@ -2008,3 +2119,221 @@ def test_set_paragraph_style_applies_en_font_without_cn_font():
     style = WordFormatter(doc).set_paragraph_style("西文样式", en_font="Arial")
 
     assert style.font.name == "Arial"
+
+
+# ====================================================================
+# 审阅模式（tracked changes）
+#
+# 修订记录只用 w:ins / w:del，这是 Office / WPS / OnlyOffice 共同支持的
+# 最小集；下面校验生成的是标准 OOXML 结构，三个软件都能解析。
+# ====================================================================
+
+def test_replace_text_defaults_to_tracked_changes():
+    """默认开启审阅：原文记成 w:del，新值记成 w:ins。"""
+    doc = Document()
+    par = doc.add_paragraph()
+    WordFormatter.set_run_font(par.add_run("标段名称："), cn_font="仿宋_GB2312", size="三号")
+
+    assert WordFormatter.replace_text(par, "标段名称：", "标段名称：一标段") == 1
+
+    xml = par._p.xml
+    assert "<w:del " in xml and "<w:ins " in xml
+    assert "<w:delText" in xml
+    assert "标段名称：一标段" in xml          # 插入内容仍是完整新值
+    assert WordFormatter.visible_text(par) == "标段名称：一标段"
+    assert "仿宋_GB2312" in xml              # 修订前后的 run 都沿用原字体
+
+
+def test_tracked_changes_records_author_and_date():
+    doc = Document()
+    par = doc.add_paragraph()
+    par.add_run("项目名称：")
+
+    WordFormatter.replace_text(
+        par, "项目名称：", "项目名称：雄安", revision_author="张三")
+
+    xml = par._p.xml
+    assert 'w:author="张三"' in xml
+    assert 'w:date="' in xml
+
+
+def test_tracked_changes_ids_are_unique():
+    doc = Document()
+    par = doc.add_paragraph()
+    par.add_run("A/B/C")
+
+    WordFormatter.replace_text(par, "/", "-", count=0)
+
+    ids = par._p.xpath(".//w:ins/@w:id | .//w:del/@w:id")
+    assert len(ids) == len(set(ids))
+
+
+def test_track_changes_false_writes_plain_text():
+    doc = Document()
+    par = doc.add_paragraph()
+    par.add_run("项目名称：")
+
+    WordFormatter.replace_text(
+        par, "项目名称：", "项目名称：雄安", track_changes=False)
+
+    xml = par._p.xml
+    assert "<w:ins " not in xml and "<w:del " not in xml
+    assert par.text == "项目名称：雄安"
+
+
+def test_tracked_cross_run_replacement_keeps_reading_order():
+    """跨 run 匹配时，删除与新值都落在匹配起点，后续文字保持原样。"""
+    doc = Document()
+    par = doc.add_paragraph()
+    par.add_run("项目名称：")
+    par.add_run("测试项目")
+
+    assert WordFormatter.replace_text(par, "名称：测试", "名称：雄安") == 1
+    assert WordFormatter.visible_text(par) == "项目名称：雄安项目"
+
+    xml = par._p.xml
+    assert xml.index("名称：") < xml.index("名称：雄安")
+
+
+def test_tracked_append_uses_insertion_revision():
+    doc = Document()
+    par = doc.add_paragraph()
+    WordFormatter.set_run_font(par.add_run("委托代理人身份证号码："), cn_font="宋体", size=12)
+
+    assert WordFormatter.replace_text(par, "", "110101199001011234") == 1
+
+    xml = par._p.xml
+    assert "<w:ins " in xml
+    assert "<w:del " not in xml                     # 追加没有删除内容
+    assert WordFormatter.visible_text(par) == "委托代理人身份证号码：110101199001011234"
+
+
+def test_tracked_append_into_empty_cell_uses_style_font():
+    doc = Document()
+    WordFormatter(doc).set_paragraph_style("Normal", font_name="楷体", font_size=15)
+    cell = doc.add_table(rows=1, cols=1).cell(0, 0)
+
+    assert WordFormatter.replace_text(cell.paragraphs[0], "", "赵六") == 1
+
+    xml = cell.paragraphs[0]._p.xml
+    assert "<w:ins " in xml
+    assert 'w:eastAsia="楷体"' in xml
+    assert 'w:sz w:val="30"' in xml
+
+
+def test_tracked_fill_underline_keeps_width_and_underline():
+    doc = Document()
+    par = doc.add_paragraph()
+    WordFormatter.set_run_font(par.add_run("地址："), cn_font="宋体", size=10.5)
+    blank = par.add_run(" " * 24)
+    WordFormatter.set_run_font(blank, cn_font="宋体", size=10.5)
+    blank.font.underline = True
+
+    result = WordFormatter.fill_underline(par, 1, "河北省雄安新区金湖街88号")
+
+    assert result["track_changes"] is True
+    assert WordFormatter.visible_text(par).endswith(result["replacement"])
+    xml = par._p.xml
+    assert "<w:del " in xml and "<w:ins " in xml
+    assert "<w:u " in xml                        # 下划线随插入内容保留
+
+
+def test_tracked_replace_underline_text_keeps_underline_on_new_value():
+    doc = Document()
+    par = doc.add_paragraph()
+    run = par.add_run("    （招标项目名称、招标编号）    ")
+    run.font.underline = True
+
+    WordFormatter.replace_underline_text(
+        par, 0, "（招标项目名称、招标编号）", "项目名称、RXZB-2026-1026")
+
+    xml = par._p.xml
+    assert "<w:ins " in xml and "<w:del " in xml
+    assert "<w:u " in xml
+    assert "项目名称、RXZB-2026-1026" in WordFormatter.visible_text(par)
+
+
+def test_tracked_set_cell_marks_old_content_deleted():
+    doc = Document()
+    cell = doc.add_table(rows=1, cols=1).cell(0, 0)
+    WordFormatter.set_cell(cell, "旧内容", track_changes=False)
+
+    WordFormatter.set_cell(cell, "新内容", bold=True)
+
+    xml = cell._tc.xml
+    assert "<w:del " in xml and "<w:ins " in xml
+    assert "旧内容" in xml                      # 旧文字留在删除修订里
+    assert WordFormatter.visible_cell_text(cell) == "新内容"
+
+
+def test_tracked_set_cell_metadata_reports_visible_text():
+    doc = Document()
+    cell = doc.add_table(rows=1, cols=1).cell(0, 0)
+    WordFormatter.set_cell(cell, "甲", track_changes=False)
+    WordFormatter.set_cell(cell, "乙")
+
+    assert WordFormatter.visible_cell_text(cell) == "乙"
+
+
+def test_tracked_edit_cell_writes_multiple_lines():
+    doc = Document()
+    table = doc.add_table(rows=1, cols=1)
+    WordFormatter.set_cell(table.cell(0, 0), "旧", track_changes=False)
+
+    WordFormatter.edit_cell(table, ["第一行", "第二行"], 0, 0)
+
+    text = WordFormatter.visible_cell_text(table.cell(0, 0))
+    assert "第一行" in text and "第二行" in text
+    assert "<w:ins " in table.cell(0, 0)._tc.xml
+    assert "<w:br/>" in table.cell(0, 0)._tc.xml.replace(" ", "")
+
+
+def test_tracked_insert_cell_image_marks_old_text_deleted(tmp_path):
+    doc = Document()
+    table = doc.add_table(rows=1, cols=1)
+    WordFormatter.set_cell(table.cell(0, 0), "此格附身份证正面", track_changes=False)
+    png = _write_test_png(tmp_path / "id.png")
+
+    WordFormatter.insert_cell_image(table.cell(0, 0), png, width=3)
+
+    xml = table.cell(0, 0)._tc.xml
+    assert "<w:del " in xml
+    assert "<w:drawing>" in xml
+    assert "<w:ins " in xml
+
+
+def test_merge_cells_track_changes_param_is_accepted():
+    """合并是结构变更，不写修订记录；参数只为签名一致而存在。"""
+    doc = Document()
+    table = WordFormatter(doc).add_table(headers=["A", "B"], rows=[["1", "2"]])
+
+    WordFormatter.merge_cells(table, [(0, 0, 1, 2)], track_changes=True)
+
+    assert WordFormatter.visible_cell_text(table.cell(0, 0)) == "A"
+
+
+def test_visible_text_ignores_deleted_runs():
+    doc = Document()
+    par = doc.add_paragraph()
+    par.add_run("保留")
+    par.add_run("删除")
+
+    WordFormatter.replace_text(par, "删除", "", track_changes=True)
+
+    assert WordFormatter.visible_text(par) == "保留"
+
+
+def test_repeated_tracked_edit_stays_flat():
+    """连续改写同一处不能产生嵌套 w:ins / w:del——OnlyOffice / WPS 解析更稳。"""
+    doc = Document()
+    par = doc.add_paragraph()
+    par.add_run("项目名称：")
+
+    WordFormatter.replace_text(par, "项目名称：", "项目名称：A")
+    WordFormatter.replace_text(par, "A", "B")
+
+    assert WordFormatter.visible_text(par) == "项目名称：B"
+    xml = par._p.xml
+    assert "<w:ins" not in xml.split("<w:del ")[1].split("</w:del>")[1][:200]
+    # 没有任何 w:ins 里面再出现 w:del / w:ins
+    assert par._p.xpath(".//w:ins//w:del | .//w:ins//w:ins | .//w:del//w:ins") == []

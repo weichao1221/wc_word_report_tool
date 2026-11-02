@@ -11,11 +11,11 @@
 设计要点
 --------
 Word 的格式是三层叠加的：``docDefaults`` → 段落样式链（``basedOn``）→ 段落/字符
-直接格式。只读 python-docx 的 ``paragraph_format`` 属性会得到一片 ``None``，既分不清
+直接格式。只读高层 ``paragraph_format`` 属性会得到一片 ``None``，既分不清
 「没设置」和「继承自样式」，也读不到章节编号、主题字体、字符单位缩进。因此这里按字段
 逐层取值，并记录来源。
 
-本模块不直接依赖 lxml：主题部件用 ``docx.oxml.parse_xml`` 解析。
+本模块直接通过内部 OOXML 模型读取主题、样式和正文 XML。
 """
 
 from __future__ import annotations
@@ -25,12 +25,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-from docx import Document
-from docx.enum.style import WD_STYLE_TYPE
-from docx.oxml import parse_xml
-from docx.oxml.ns import qn
-from docx.table import Table
-
+from .ooxml import WD_STYLE_TYPE, Document, Table, parse_xml, qn, serialize_for_reading
 from .word import WordFormatter
 
 SCHEMA_VERSION = 1
@@ -91,8 +86,6 @@ def _xml(element) -> str:
     try:
         return element.xml
     except AttributeError:
-        from docx.oxml.xmlchemy import serialize_for_reading
-
         return serialize_for_reading(element)
 
 
@@ -556,10 +549,11 @@ def _style_only_run_fields(paragraph, ctx: _Context):
 
 
 def _dominant_run(paragraph):
-    for run in paragraph.runs:
-        if run.text.strip():
+    runs = WordFormatter._revision_runs(paragraph)
+    for run in runs:
+        if WordFormatter._run_text(run).strip():
             return run
-    return paragraph.runs[0] if paragraph.runs else None
+    return runs[0] if runs else None
 
 
 def _describe_paragraph(paragraph, ctx: _Context):
@@ -682,7 +676,7 @@ def _describe_observed(doc, ctx: _Context, *, max_groups: int, max_samples: int)
             continue
         index = paragraph_index
         paragraph_index += 1
-        if not item.text.strip():
+        if not WordFormatter.visible_text(item).strip():
             continue
         font, paragraph, sources = _describe_paragraph(item, ctx)
         style_name = item.style.name if getattr(item, "style", None) is not None else None
@@ -725,7 +719,7 @@ def _cell_shading(cell) -> str | None:
 
 def _row_sample(row, ctx: _Context):
     for cell in row.cells:
-        if not cell.text.strip() or not cell.paragraphs:
+        if not WordFormatter.visible_cell_text(cell).strip() or not cell.paragraphs:
             continue
         font, paragraph, _sources = _describe_paragraph(cell.paragraphs[0], ctx)
         return {
@@ -940,7 +934,7 @@ def _describe_page(doc) -> dict[str, Any]:
 
 
 def _paragraph_text(paragraph) -> str:
-    return "".join(WordFormatter._run_text(run) for run in paragraph.runs)
+    return WordFormatter.visible_text(paragraph)
 
 
 def _paragraph_tabs(paragraph) -> list[dict[str, Any]]:
@@ -1017,7 +1011,7 @@ def _describe_header_part(part, ctx: _Context, *, kind: str) -> dict[str, Any]:
             continue
         font, paragraph_format, _sources = _describe_paragraph(paragraph, ctx)
         runs = []
-        for run in paragraph.runs:
+        for run in WordFormatter._revision_runs(paragraph):
             run_text = WordFormatter._run_text(run)
             if not run_text.strip():
                 continue
@@ -1148,7 +1142,7 @@ def _collect_numbering_usage(doc, ctx: _Context) -> None:
             continue
         index = paragraph_index
         paragraph_index += 1
-        if not item.text.strip():
+        if not WordFormatter.visible_text(item).strip():
             continue
         fields, _sources = _paragraph_fields(item, ctx)
         num_id = fields.get("numbering.num_id")
